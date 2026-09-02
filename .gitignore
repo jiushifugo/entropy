@@ -1,0 +1,24 @@
+# secrets & local config / 密钥与本地配置
+.env
+config.yaml
+
+# runtime output / 运行时输出
+logs/
+*.log
+*.patch
+*.backup
+*.tar.gz
+*.tgz
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
