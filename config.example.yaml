@@ -15,9 +15,10 @@
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
+#   arcus        Arcus perpetuals            (USD, configure actual taker fee)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
 #     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy 永远是其中一条腿；--hedge 选择对冲腿（三选一，见上表）。
+# Entropy 永远是其中一条腿；--hedge 选择对冲腿（见上表）。
 
 # ============================ THE SIGNAL / 信号 ============================
 # premium_bps = (Entropy price / hedge price - 1) * 10000
@@ -48,7 +49,7 @@ entropy:
   max_orders_per_min: 120    # order-send budget, sliding 60s / 每分钟下单预算
 
 hedge:
-  taker_fee_bps: 0.0         # Lighter venues: 0; tradexyz: ~1.0
+  taker_fee_bps: 0.0         # Lighter: 0; tradexyz: ~1; Arcus: set your tier
   max_position_usd: 1000
   max_orders_per_min: 30     # Lighter's ceiling is ~40/min / Lighter 上限约 40/分钟
 

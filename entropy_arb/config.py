@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
-HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz", "arcus")
 
 
 @dataclass(frozen=True)
@@ -78,9 +78,24 @@ class HLCreds:
 
 
 @dataclass
+class ArcusCreds:
+    address: Optional[str]
+    account_index: Optional[int]
+    api_key: Optional[str]
+    api_private_key: Optional[str]
+    api_private_key_file: Optional[str]
+
+    @property
+    def complete(self) -> bool:
+        return (bool(self.address) and self.account_index is not None
+                and bool(self.api_key)
+                and bool(self.api_private_key or self.api_private_key_file))
+
+
+@dataclass
 class VenueConf:
     key: str                  # "entropy" | "hedge"
-    kind: str                 # "hl" | "lighter"
+    kind: str                 # "hl" | "lighter" | "arcus"
     label: str                # human name for logs, e.g. "ENTROPY", "RH"
     symbol: str
     fee_bps: float
@@ -92,6 +107,11 @@ class VenueConf:
     # lighter
     lighter_profile: Optional[LighterProfile] = None
     lighter_creds: Optional[LighterCreds] = None
+    # arcus
+    arcus_api_url: str = ""
+    arcus_ws_url: str = ""
+    arcus_network: str = ""
+    arcus_creds: Optional[ArcusCreds] = None
 
 
 @dataclass
@@ -158,6 +178,9 @@ class Config:
                 return False
             if v.kind == "lighter" and not (v.lighter_creds
                                             and v.lighter_creds.complete):
+                return False
+            if v.kind == "arcus" and not (v.arcus_creds
+                                          and v.arcus_creds.complete):
                 return False
         return True
 
@@ -350,7 +373,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                 _env_s("HL_PRIVATE_KEY_XYZ") or _env_s("HL_PRIVATE_KEY"),
                 _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
         )
-    else:
+    elif hedge_venue in LIGHTER_PROFILES:
         hedge = VenueConf(
             key="hedge", kind="lighter",
             label="LIGHTER" if hedge_venue == "lighter" else "RH",
@@ -362,6 +385,28 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
                                        _env_i("LIGHTER_API_KEY_INDEX"),
                                        _env_s("LIGHTER_API_PRIVATE_KEY")),
+        )
+    else:
+        network = (_env_s("ARCUS_NETWORK") or "mainnet").lower()
+        if network not in ("mainnet", "testnet"):
+            raise ConfigError("ARCUS_NETWORK must be 'mainnet' or 'testnet'")
+        default_api = ("https://api.arcus.xyz" if network == "mainnet"
+                       else "https://api.testnet.arcus.xyz")
+        default_ws = ("wss://api.arcus.xyz/v1/ws" if network == "mainnet"
+                      else "wss://api.testnet.arcus.xyz/v1/ws")
+        hedge = VenueConf(
+            key="hedge", kind="arcus", label="ARCUS",
+            symbol=symbol,
+            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 5.0)),
+            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
+            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
+            arcus_api_url=_env_s("ARCUS_API_URL") or default_api,
+            arcus_ws_url=_env_s("ARCUS_WS_URL") or default_ws,
+            arcus_network=network,
+            arcus_creds=ArcusCreds(
+                _env_s("ARCUS_ADDRESS"), _env_i("ARCUS_ACCOUNT_INDEX"),
+                _env_s("ARCUS_API_KEY"), _env_s("ARCUS_API_PRIVATE_KEY"),
+                _env_s("ARCUS_API_PRIVATE_KEY_FILE")),
         )
 
     legacy_leg_slip = float(_get(raw, "execution", "leg_slippage_bps", 50.0))

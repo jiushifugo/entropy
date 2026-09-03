@@ -63,6 +63,16 @@ def test_tradexyz_hedge():
     assert cfg.hedge.label == "XYZ"
 
 
+def test_arcus_hedge_defaults_to_mainnet():
+    cfg = load(MINIMAL, hedge="arcus")
+    assert cfg.hedge.kind == "arcus"
+    assert cfg.hedge.label == "ARCUS"
+    assert cfg.hedge.arcus_api_url == "https://api.arcus.xyz"
+    assert cfg.hedge.arcus_ws_url == "wss://api.arcus.xyz/v1/ws"
+    assert cfg.hedge.arcus_network == "mainnet"
+    assert cfg.hedge.fee_bps == 5.0
+
+
 def expect_error(yaml_text: str, needle: str, **kw):
     try:
         load(yaml_text, **kw)

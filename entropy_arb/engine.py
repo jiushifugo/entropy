@@ -31,6 +31,7 @@ from .config import Config
 from .recorder import MinuteRecorder
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
+from .venue_arcus import ArcusVenue
 
 log = logging.getLogger("engine")
 
@@ -142,18 +143,27 @@ class Engine:
     def _make_venue(self, vc):
         if vc.kind == "lighter":
             return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
+        if vc.kind == "arcus":
+            return ArcusVenue(vc, self.session, self.cfg.settle_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
                        self.session, self.cfg.settle_timeout_sec)
 
     async def _run_inner(self) -> None:
         cfg = self.cfg
+        live = not self.record_only
+        if (live and cfg.hedge.kind == "arcus"
+                and cfg.hedge.arcus_network != "mainnet"):
+            raise RuntimeError(
+                "Arcus testnet is record-only here: the Entropy leg is on "
+                "Hyperliquid mainnet, so live mode would mix test and real "
+                "funds / Arcus 测试网仅允许 --record-only，不能与 Entropy "
+                "主网组成实盘交易")
         self.entropy = self._make_venue(cfg.entropy)
         self.hedge = self._make_venue(cfg.hedge)
         self.venues = {"entropy": self.entropy, "hedge": self.hedge}
         await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
         self.markets_ready = True
 
-        live = not self.record_only
         if live:
             if not cfg.creds_complete:
                 raise RuntimeError(

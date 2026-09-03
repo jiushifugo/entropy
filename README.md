@@ -10,6 +10,7 @@ Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
 | `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
 | `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
+| `arcus` | Arcus perpetuals | USD | account tier | Arcus ws, async IOC settle |
 
 > **Referral links** — signing up through these supports this project:
 > - Entropy — Tier 4 referral, 100% rebates: <https://entropy.io/?r=yourquantguy>
@@ -78,7 +79,7 @@ cp .env.example .env                     # credentials — required to trade
 
 The markets are **not** in the config file — you state them explicitly on
 every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
+`lighter`, `lighter-rh`, `tradexyz`, `arcus`; Entropy is always the
 other leg).
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
@@ -180,6 +181,12 @@ errors), credentials in `.env`, and the markets on the command line
   `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
   `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
   keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
+- **Arcus** — set `ARCUS_ADDRESS`, `ARCUS_ACCOUNT_INDEX`,
+  `ARCUS_API_KEY`, and either `ARCUS_API_PRIVATE_KEY` or
+  `ARCUS_API_PRIVATE_KEY_FILE`. This is an Ed25519 API key; never provide
+  the Ethereum master-wallet private key. `ARCUS_NETWORK` defaults to
+  `mainnet`; testnet is intentionally restricted to `--record-only`
+  because the Entropy leg itself is mainnet.
 
 ## How execution works
 
@@ -219,6 +226,7 @@ entropy_arb/book.py      order books + fee-aware crossing/sizing math
 entropy_arb/feeds.py     official HL ws + zkLighter ws book feeds
 entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
+entropy_arb/venue_arcus.py  Arcus REST/WS + Ed25519 adapter
 entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars

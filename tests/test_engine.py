@@ -32,6 +32,19 @@ execution:
                        symbol="SNDK", hedge_venue="lighter-rh")
 
 
+def test_arcus_testnet_cannot_enter_live_mode():
+    cfg = make_cfg()
+    cfg.hedge.kind = "arcus"
+    cfg.hedge.arcus_network = "testnet"
+    eng = Engine(cfg, record_only=False)
+    try:
+        asyncio.run(eng._run_inner())
+    except RuntimeError as e:
+        assert "record-only" in str(e)
+    else:
+        raise AssertionError("mixed testnet/mainnet live mode must fail")
+
+
 class StubVenue:
     def __init__(self, key, label, cap=10000.0, fee=0.0):
         self.key, self.name = key, label

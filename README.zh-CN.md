@@ -3,13 +3,14 @@
 **[English documentation / 英文文档 → README.md](README.md)**
 
 开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）三选一：
+`io` builder dex）；另一条腿作为对冲腿：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
 | `lighter` | Lighter 主网 | USDC | 0 bps | zkLighter ws（增量订单簿，异步结算） |
 | `lighter-rh` | Lighter Robinhood 链 | **USDG** | 0 bps | zkLighter ws |
 | `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步结算 |
+| `arcus` | Arcus 永续合约 | USD | 按账户等级 | Arcus ws，IOC 异步结算 |
 
 > **推荐链接** —— 通过以下链接注册即可支持本项目：
 > - Entropy — Tier 4 推荐，100% 返佣：<https://entropy.io/?r=yourquantguy>
@@ -70,8 +71,8 @@ cp .env.example .env                     # 密钥——交易必填
 ```
 
 交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
-`--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
-`lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
+`--symbol`（两个交易所共同交易的品种）和 `--hedge`：
+`lighter`、`lighter-rh`、`tradexyz`、`arcus`；Entropy 永远是
 另一条腿）。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
@@ -167,6 +168,11 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
   （主网与 Robinhood 链是两套独立的账户和密钥——参见
   [lighter-python](https://github.com/elliottech/lighter-python)）。
+- **Arcus** —— 填写 `ARCUS_ADDRESS`、`ARCUS_ACCOUNT_INDEX`、
+  `ARCUS_API_KEY`，并在 `ARCUS_API_PRIVATE_KEY` 与
+  `ARCUS_API_PRIVATE_KEY_FILE` 中二选一。这里使用 Ed25519 API 私钥，
+  绝不能填写 Ethereum 主钱包私钥；`ARCUS_NETWORK` 默认是 `mainnet`。
+  Arcus 测试网仅允许 `--record-only`，因为 Entropy 交易腿位于主网。
 
 ## 执行机制
 
@@ -200,6 +206,7 @@ entropy_arb/book.py      订单簿 + 含手续费的套利规模计算
 entropy_arb/feeds.py     官方 HL ws + zkLighter ws 行情
 entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
+entropy_arb/venue_arcus.py  Arcus REST/WS + Ed25519 适配器
 entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
