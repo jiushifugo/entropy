@@ -57,3 +57,15 @@ def test_order_feed_resolves_partial_ioc():
                           "avg_px": 99.5}
 
     asyncio.run(go())
+
+
+def test_order_feed_channel_data_marks_ready():
+    async def go():
+        feed = ArcusOrdersFeed("ARCUS", "ws://unused",
+                               "0x" + "1" * 40, 0, "BTC-USD")
+        assert not feed.ready.is_set()
+        feed._handle_message({
+            "channel": "orders", "type": "channel_data", "contents": []})
+        assert feed.ready.is_set()
+
+    asyncio.run(go())

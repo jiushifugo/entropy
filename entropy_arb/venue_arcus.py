@@ -209,6 +209,20 @@ class ArcusOrdersFeed:
                 if len(self._early) > 512:
                     self._early.pop(next(iter(self._early)))
 
+    def _handle_message(self, msg: dict) -> None:
+        if (msg.get("channel") != "orders"
+                or msg.get("type") not in ("subscribed", "channel_data")):
+            return
+        if not self.ready.is_set():
+            log.info("[%s] orders ws ready (%s account %d)",
+                     self.name, self.address, self.account_index)
+        # Some Arcus deployments send the initial channel_data snapshot
+        # without a separate subscribed acknowledgement.  Receiving either
+        # proves the private order stream is live and is sufficient for
+        # settlement.
+        self.ready.set()
+        self._handle(msg.get("contents"))
+
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
         while not stop.is_set():
@@ -223,11 +237,7 @@ class ArcusOrdersFeed:
                     async for raw in ws:
                         backoff = 1.0
                         msg = json.loads(raw)
-                        if msg.get("channel") == "orders":
-                            if msg.get("type") == "subscribed":
-                                self.ready.set()
-                            if msg.get("type") in ("subscribed", "channel_data"):
-                                self._handle(msg.get("contents"))
+                        self._handle_message(msg)
                         if stop.is_set():
                             break
             except asyncio.CancelledError:
