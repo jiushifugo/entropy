@@ -69,3 +69,14 @@ def test_order_feed_channel_data_marks_ready():
         assert feed.ready.is_set()
 
     asyncio.run(go())
+
+
+def test_order_feed_subscription_uses_documented_shape():
+    feed = ArcusOrdersFeed("ARCUS", "ws://unused",
+                           "0x" + "a" * 40, 0, "SNDK-USD")
+    assert feed._subscribe_message() == {
+        "type": "subscribe",
+        "channel": "orders",
+        "id": "0x" + "a" * 40,
+        "nRecentClosed": 100,
+    }

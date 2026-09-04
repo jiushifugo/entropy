@@ -171,6 +171,13 @@ class ArcusOrdersFeed:
         self._pending: dict[str, asyncio.Future] = {}
         self._early: dict[str, dict] = {}
 
+    def _subscribe_message(self) -> dict:
+        # Arcus account channels use the Ethereum address as the subscription
+        # id.  accountIndex and market are response fields/filters elsewhere,
+        # not accepted fields on an orders subscription.
+        return {"type": "subscribe", "channel": "orders",
+                "id": self.address, "nRecentClosed": 100}
+
     def watch(self, client_id: str) -> asyncio.Future:
         fut = asyncio.get_running_loop().create_future()
         early = self._early.pop(client_id, None)
@@ -230,13 +237,14 @@ class ArcusOrdersFeed:
                 async with ws_connect(self.ws_url, max_size=2**23,
                                       open_timeout=10, ping_interval=15,
                                       ping_timeout=15) as ws:
-                    await ws.send(json.dumps({
-                        "type": "subscribe", "channel": "orders",
-                        "id": self.address, "accountIndex": self.account_index,
-                        "market": self.market, "snapshot": True}))
+                    await ws.send(json.dumps(self._subscribe_message()))
                     async for raw in ws:
                         backoff = 1.0
                         msg = json.loads(raw)
+                        if (msg.get("type") == "error"
+                                or int(msg.get("status") or 0) >= 400):
+                            log.warning("[%s] orders ws rejected: %s",
+                                        self.name, str(msg)[:300])
                         self._handle_message(msg)
                         if stop.is_set():
                             break
