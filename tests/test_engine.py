@@ -26,6 +26,7 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: 0.0
+  second_leg_latency_reserve_bps: 0.0
 """)
     f.close()
     return load_config(f.name, NO_ENV,
@@ -97,6 +98,14 @@ def test_eff_threshold_directions():
         eng.cfg.midline_bps = m
         total = eng._eff_threshold(buy=h, sell=e) + eng._eff_threshold(buy=e, sell=h)
         approx(total, 7.0)
+
+
+def test_second_leg_latency_reserve_raises_both_hurdles():
+    eng = make_engine(midline=5.0, upper=4.0, lower=3.0)
+    eng.cfg.second_leg_latency_reserve_bps = 5.0
+    e, h = eng.entropy, eng.hedge
+    approx(eng._eff_threshold(buy=h, sell=e), 14.0)
+    approx(eng._eff_threshold(buy=e, sell=h), 3.0)
 
 
 def test_entropy_resting_edge_guard_tracks_hedge_book():

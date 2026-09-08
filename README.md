@@ -54,8 +54,9 @@ midline − lower  ────────────────────�
 
 Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
 and vice versa) and are **net of both venues' taker fees** — the engine adds
-fees on top before a slice qualifies. A full round trip therefore nets
-**≥ upper + lower bps after fees by construction**.
+fees on top before a slice qualifies. It also adds the configured serial-leg
+latency reserve to each execution hurdle; without execution slippage, a full
+round trip therefore clears both bands plus both latency reserves after fees.
 
 One consequence worth understanding: with `midline_bps: 5`, the buy-entropy
 hurdle is `lower − midline`, which can be **negative**. That is intentional —
@@ -165,6 +166,7 @@ errors), credentials in `.env`, and the markets on the command line
 | `sizing.max_order_notional_usd` | per-slice cap | 500 |
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
+| `execution.second_leg_latency_reserve_bps` | extra net edge reserved for serial-leg latency | 5.0 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
 | `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
@@ -210,6 +212,11 @@ errors), credentials in `.env`, and the markets on the command line
 - **Net-delta hedge**: if legs fill unevenly, the imbalance is immediately
   reduced (reduce-only, price-protected), and positions are reconciled
   against the chain every `reconcile_sec`.
+- **Fast private fill confirmation**: Entropy IOC orders race the signed REST
+  response against Hyperliquid `orderUpdates`. A websocket-confirmed fill
+  starts the hedge immediately; exact REST fill-price accounting is completed
+  only after the hedge is sent. `second_leg_latency_reserve_bps` also requires
+  extra executable edge before exposing the first leg.
 - **Failure containment**: a rate-limited venue pauses briefly; an
   unreachable venue (e.g. exchange maintenance) pauses trading and is probed
   every `venue_probe_sec` until it recovers; `max_consecutive_errors`

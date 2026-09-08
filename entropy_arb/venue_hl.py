@@ -6,10 +6,11 @@ OFFICIAL websocket (see feeds.HLBookFeed). Trading lazily imports the
 official `hyperliquid-python-sdk` signing helpers + eth_account —
 --record-only data collection needs neither.
 
-IOC limit orders settle synchronously in the /exchange response; unknown
-outcomes (timeout/5xx) fall back to orderStatus-by-cloid polling inside
-send_taker(), so the engine sees the same unified result shape as the Lighter
-venue: {status, filled_base, avg_px, err, unresolved}.
+IOC orders are submitted through /exchange while a private orderUpdates
+subscription races the HTTP response.  A websocket-confirmed fill can start
+the second leg immediately; unknown outcomes (timeout/5xx) still fall back to
+orderStatus-by-cloid polling, so the engine sees the same unified result shape
+as the other venues: {status, filled_base, avg_px, err, unresolved}.
 """
 from __future__ import annotations
 
@@ -21,6 +22,11 @@ import time
 from typing import Callable, Optional
 
 import aiohttp
+
+try:
+    from websockets.asyncio.client import connect as ws_connect
+except ImportError:
+    from websockets import connect as ws_connect  # type: ignore
 
 from .book import OrderBook
 from .config import VenueConf
@@ -56,6 +62,150 @@ class HLAccount:
         return s
 
 
+class HLOrderUpdatesFeed:
+    """Private Hyperliquid order updates keyed by client order id.
+
+    The REST exchange response remains the authoritative source for average
+    fill price.  This stream is the fast path for learning that the
+    Entropy-first IOC filled, allowing the engine to start the hedge before
+    the slower REST response arrives.
+    """
+
+    def __init__(self, name: str, ws_url: str, user: str, coin: str,
+                 ping_sec: float = 5.0) -> None:
+        self.name, self.ws_url = name, ws_url
+        self.user, self.coin = user.lower(), coin
+        self.ping_sec = ping_sec
+        self.ready = asyncio.Event()
+        self._pending: dict[str, asyncio.Future] = {}
+        self._early: dict[str, dict] = {}
+
+    @staticmethod
+    def _key(cloid) -> str:
+        return str(cloid or "").lower()
+
+    def watch(self, cloid: str) -> asyncio.Future:
+        key = self._key(cloid)
+        fut = asyncio.get_running_loop().create_future()
+        early = self._early.pop(key, None)
+        if early is not None:
+            fut.set_result(early)
+        else:
+            self._pending[key] = fut
+        return fut
+
+    def unwatch(self, cloid: str) -> None:
+        fut = self._pending.pop(self._key(cloid), None)
+        if fut is not None and not fut.done():
+            fut.cancel()
+
+    def _resolve(self, cloid: str, info: dict) -> None:
+        key = self._key(cloid)
+        if not key:
+            return
+        fut = self._pending.pop(key, None)
+        if fut is not None and not fut.done():
+            fut.set_result(info)
+            return
+        self._early[key] = info
+        if len(self._early) > 512:
+            self._early.pop(next(iter(self._early)))
+
+    def _handle_message(self, msg: dict) -> None:
+        channel = msg.get("channel")
+        if channel == "subscriptionResponse":
+            sub = (msg.get("data") or {}).get("subscription") or {}
+            if (sub.get("type") == "orderUpdates"
+                    and str(sub.get("user", "")).lower() == self.user):
+                if not self.ready.is_set():
+                    log.info("[%s] order updates ws ready (%s)",
+                             self.name, self.user)
+                self.ready.set()
+            return
+        if channel != "orderUpdates":
+            return
+        if not self.ready.is_set():
+            log.info("[%s] order updates ws ready (%s)",
+                     self.name, self.user)
+            self.ready.set()
+        rows = msg.get("data") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        for update in rows:
+            order = (update or {}).get("order") or {}
+            if order.get("coin") != self.coin:
+                continue
+            status = str((update or {}).get("status") or "").lower()
+            # IOC updates may briefly report open before their final state.
+            if not status or status in {"open", "triggered", "scheduled"}:
+                continue
+            cloid = self._key(order.get("cloid"))
+            if not cloid:
+                continue
+            try:
+                original = float(order.get("origSz") or 0.0)
+                remaining = float(order.get("sz") or 0.0)
+            except (TypeError, ValueError):
+                original = remaining = 0.0
+            filled = (original if status == "filled"
+                      else max(original - remaining, 0.0))
+            self._resolve(cloid, {
+                "status": status,
+                "filled_base": filled,
+                "avg_px": None,
+                "oid": order.get("oid"),
+                "err": None,
+                "unresolved": False,
+                "confirm_source": "ws",
+            })
+
+    async def _pinger(self, ws) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.ping_sec)
+                await ws.send(json.dumps({"method": "ping"}))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    async def run(self, stop: asyncio.Event) -> None:
+        backoff = 1.0
+        while not stop.is_set():
+            ptask = None
+            try:
+                async with ws_connect(self.ws_url, max_size=2**23,
+                                      open_timeout=10, ping_interval=15,
+                                      ping_timeout=15) as ws:
+                    await ws.send(json.dumps({
+                        "method": "subscribe",
+                        "subscription": {
+                            "type": "orderUpdates", "user": self.user,
+                        },
+                    }))
+                    ptask = asyncio.create_task(self._pinger(ws))
+                    async for raw in ws:
+                        backoff = 1.0
+                        self._handle_message(json.loads(raw))
+                        if stop.is_set():
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("[%s] order updates ws error: %s — reconnect in %.0fs",
+                            self.name, exc, backoff)
+            finally:
+                if ptask is not None:
+                    ptask.cancel()
+            self.ready.clear()
+            if not stop.is_set():
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+
 class HLVenue:
     kind = "hl"
 
@@ -88,6 +238,7 @@ class HLVenue:
         self.min_quote = 10.0
         self._cloid = int(time.time() * 1000)
         self._signing = None      # lazy hyperliquid-sdk signing module
+        self.order_feed: Optional[HLOrderUpdatesFeed] = None
 
     async def _info(self, payload: dict):
         async with self.session.post(
@@ -145,13 +296,21 @@ class HLVenue:
                      self.name, other.name)
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
-        return [asyncio.create_task(
+        tasks = [asyncio.create_task(
             HLBookFeed(self.name, self.ws_url, self.coin, self.book,
                        notify).run(stop),
             name=f"book-{self.key}")]
+        if live:
+            assert self.account is not None
+            self.order_feed = HLOrderUpdatesFeed(
+                self.name, self.ws_url, self.account.query_address, self.coin)
+            tasks.append(asyncio.create_task(
+                self.order_feed.run(stop), name=f"orders-{self.key}"))
+        return tasks
 
     def ready_to_trade(self) -> bool:
-        return self.account is not None
+        return (self.account is not None and self.order_feed is not None
+                and self.order_feed.ready.is_set())
 
     async def warm_http(self) -> None:
         """Order-path keepalive ping (driven by the engine's keepalive loop)."""
@@ -387,21 +546,84 @@ class HLVenue:
             return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
                     "err": f"signing failed: {e!r}", "unresolved": False}
 
-        body, err, unresolved = await self._post_exchange(payload)
-        if err is not None:
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": err, "unresolved": False}
-        if not unresolved:
-            res = self._parse(body)
-            if not res.get("unresolved"):
-                return res
-        # unknown outcome: poll orderStatus by cloid until the deadline
+        cloid_raw = cloid.to_raw()
+        ws_fut = (self.order_feed.watch(cloid_raw)
+                  if self.order_feed is not None else None)
+        post_task = asyncio.create_task(self._post_exchange(payload))
+        mono_deadline = time.monotonic() + self.settle_timeout
+        waiters = {post_task}
+        if ws_fut is not None:
+            waiters.add(ws_fut)
+        try:
+            done, _ = await asyncio.wait(
+                waiters, timeout=self.settle_timeout,
+                return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            if ws_fut is not None:
+                self.order_feed.unwatch(cloid_raw)
+            post_task.cancel()
+            await asyncio.gather(post_task, return_exceptions=True)
+            raise
+
+        # The private stream is the risk fast path.  It confirms quantity so
+        # the engine can hedge immediately; the still-running REST task is
+        # retained only for the authoritative average fill price.
+        if ws_fut is not None and ws_fut in done:
+            info = ws_fut.result()
+            if post_task.done():
+                try:
+                    body, err, unresolved = post_task.result()
+                    if err is None and not unresolved:
+                        detailed = self._parse(body)
+                        if detailed.get("avg_px") is not None:
+                            info["avg_px"] = detailed["avg_px"]
+                except Exception:
+                    pass
+            elif float(info.get("filled_base") or 0.0) > 0:
+                info["_rest_detail_task"] = post_task
+            else:
+                post_task.cancel()
+                await asyncio.gather(post_task, return_exceptions=True)
+            return info
+
+        if post_task in done:
+            try:
+                body, err, unresolved = post_task.result()
+            except Exception as exc:
+                body, err, unresolved = None, repr(exc), False
+            if err is not None:
+                if ws_fut is not None:
+                    self.order_feed.unwatch(cloid_raw)
+                return {"status": "send-failed", "filled_base": 0.0,
+                        "avg_px": None, "err": err, "unresolved": False,
+                        "confirm_source": "rest"}
+            if not unresolved:
+                res = self._parse(body)
+                if not res.get("unresolved"):
+                    if ws_fut is not None:
+                        self.order_feed.unwatch(cloid_raw)
+                    res["confirm_source"] = "rest"
+                    return res
+            if ws_fut is not None:
+                remaining = max(mono_deadline - time.monotonic(), 0.0)
+                try:
+                    return await asyncio.wait_for(ws_fut, timeout=remaining)
+                except asyncio.TimeoutError:
+                    self.order_feed.unwatch(cloid_raw)
+        else:
+            post_task.cancel()
+            await asyncio.gather(post_task, return_exceptions=True)
+            if ws_fut is not None:
+                self.order_feed.unwatch(cloid_raw)
+
+        # Unknown outcome: poll orderStatus by cloid until a fresh conservative
+        # deadline, matching the pre-websocket fallback behavior.
         deadline = time.time() + self.settle_timeout
         while time.time() < deadline:
             try:
                 st = await self._info({"type": "orderStatus",
                                        "user": self.account.query_address,
-                                       "oid": cloid.to_raw()})
+                                       "oid": cloid_raw})
             except Exception:
                 st = None
             if st and st.get("status") == "order":
@@ -415,10 +637,39 @@ class HLVenue:
                     filled = 0.0
                 if status != "open":
                     return {"status": status, "filled_base": filled,
-                            "avg_px": None, "err": None, "unresolved": False}
+                            "avg_px": None, "err": None, "unresolved": False,
+                            "confirm_source": "poll"}
             await asyncio.sleep(0.5)
         return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
-                "err": None, "unresolved": True}
+                "err": None, "unresolved": True,
+                "confirm_source": "timeout"}
+
+    async def finalize_order_info(self, info: dict, *, wait: bool = True) -> dict:
+        """Fill in REST average price after fast websocket confirmation.
+
+        The engine calls this after sending the mandatory hedge, so waiting
+        for accounting detail can never delay the risk-reducing second leg.
+        """
+        task = info.pop("_rest_detail_task", None)
+        if task is None:
+            return info
+        if not wait:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return info
+        try:
+            body, err, unresolved = await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.settle_timeout)
+            if err is None and not unresolved:
+                detailed = self._parse(body)
+                if detailed.get("avg_px") is not None:
+                    info["avg_px"] = detailed["avg_px"]
+        except Exception as exc:
+            log.debug("[%s] REST fill detail unavailable: %r", self.name, exc)
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        return info
 
     async def _post_exchange(self, payload: dict):
         try:

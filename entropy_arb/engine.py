@@ -187,10 +187,11 @@ class Engine:
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
         log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
-                 "fees=%.2f+%.2f step=%g min_ntl=$%g",
+                 "fees=%.2f+%.2f latency_reserve=%.2fbps step=%g min_ntl=$%g",
                  self.entropy.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
                  cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
+                 cfg.second_leg_latency_reserve_bps,
                  self._step, self._min_notional)
 
         if self.record_only:
@@ -284,7 +285,12 @@ class Engine:
             base = self.cfg.midline_bps + self.cfg.upper_bps
         else:
             base = self.cfg.lower_bps - self.cfg.midline_bps
-        return base + self._inv_add_bps(buy, sell)
+        # The hedge is sent only after the Entropy-first fill is confirmed.
+        # Require explicit edge for adverse book movement during that serial
+        # gap.  This raises the admission hurdle and cannot be spent by the
+        # dynamic Entropy IOC slippage allowance.
+        return (base + self._inv_add_bps(buy, sell)
+                + self.cfg.second_leg_latency_reserve_bps)
 
     def _state_cap_notional(self, dkey: str, ref_px: float) -> float:
         """Allow entries only while flat; once paired inventory exists, allow
@@ -713,12 +719,13 @@ class Engine:
         entropy_elapsed_ms = (time.perf_counter() - entropy_started) * 1000.0
         entropy_log_tag = "ENTROPY LIMIT" if managed_entropy else "ENTROPY IOC"
         log.info("[%s] %s attempt 1: %s %.6g @%s%.6g | %s fill %.6g | "
-                 "%.0fms", entropy_log_tag, direction,
+                 "%.0fms via %s", entropy_log_tag, direction,
                  "BUY" if entropy_is_buy else "SELL", plan.qty,
                  "<=" if entropy_is_buy else ">=", entropy_bound,
                  entropy_info.get("status", "unknown"),
                  float(entropy_info.get("filled_base") or 0.0),
-                 entropy_elapsed_ms)
+                 entropy_elapsed_ms,
+                 entropy_info.get("confirm_source", "rest"))
         entropy_fill = float(entropy_info.get("filled_base") or 0.0)
 
         # A canceled Entropy IOC is safe to retry because RH has not been
@@ -796,7 +803,7 @@ class Engine:
                         retry_elapsed_ms = (
                             time.perf_counter() - retry_started) * 1000.0
                         log.info("[ENTROPY IOC] %s attempt 2: %s %.6g "
-                                 "@%s%.6g | %s fill %.6g | %.0fms",
+                                 "@%s%.6g | %s fill %.6g | %.0fms via %s",
                                  direction,
                                  "BUY" if entropy_is_buy else "SELL",
                                  retry_plan.qty,
@@ -804,19 +811,29 @@ class Engine:
                                  retry_bound,
                                  retry_info.get("status", "unknown"),
                                  float(retry_info.get("filled_base") or 0.0),
-                                 retry_elapsed_ms)
+                                 retry_elapsed_ms,
+                                 retry_info.get("confirm_source", "rest"))
                         plan = retry_plan
                         entropy_info = retry_info
                         entropy_fill = float(
                             entropy_info.get("filled_base") or 0.0)
 
+        entropy_confirm_ms = (time.perf_counter() - entropy_started) * 1000.0
         hedge_info = failed_info(status="skipped-no-entropy-fill")
+        hedge_elapsed_ms = 0.0
+        hedge_drift_bps = 0.0
         if (entropy_fill > cfg.net_tolerance_base
                 and not entropy_info.get("unresolved")
                 and entropy_info.get("err") is None):
             hedge_qty = floor_step(entropy_fill, self._step)
             hedge_is_buy = not entropy_is_buy
             ref = hedge.book.best_ask() if hedge_is_buy else hedge.book.best_bid()
+            planned_hedge_px = (plan.buy_limit if hedge_is_buy
+                                else plan.sell_limit)
+            if ref and planned_hedge_px:
+                hedge_drift_bps = ((ref / planned_hedge_px - 1.0) * 1e4
+                                   if hedge_is_buy else
+                                   (planned_hedge_px / ref - 1.0) * 1e4)
             # Once Entropy has filled this is no longer an optional arb leg:
             # completing the hedge is mandatory.  Do not reuse the tiny
             # entry-edge budget (which can be fractions of a bp in volume
@@ -829,17 +846,45 @@ class Engine:
                     ref * (1 + hedge_slip_bps / 1e4), round_up=False) \
                     if hedge_is_buy else hedge.px_round(
                         ref * (1 - hedge_slip_bps / 1e4), round_up=True)
-                log.info("[HEDGE LEG] %s: %s %.6g on %s @%.6g after "
-                         "Entropy fill %.6g | protection %.2fbps", direction,
+                log.info("[HEDGE LEG] %s: %s %.6g on %s ref %.6g @%.6g "
+                         "after Entropy fill %.6g | drift %+.2fbps | "
+                         "protection %.2fbps", direction,
                          "BUY" if hedge_is_buy else "SELL", hedge_qty,
-                         hedge.name, hedge_bound, entropy_fill,
+                         hedge.name, ref, hedge_bound, entropy_fill,
+                         hedge_drift_bps,
                          hedge_slip_bps)
+                hedge_started = time.perf_counter()
                 hedge_info = await send(hedge, is_buy=hedge_is_buy,
                                         qty=hedge_qty, limit_px=hedge_bound)
+                hedge_elapsed_ms = (
+                    time.perf_counter() - hedge_started) * 1000.0
             else:
                 hedge_info = failed_info(
                     "confirmed Entropy fill is below hedgeable minimum",
                     "unhedgeable")
+
+        # A websocket-confirmed Entropy fill may still have a REST response
+        # carrying its exact average price.  Resolve that accounting detail
+        # only after the hedge has already been sent.  If the hedge failed or
+        # filled asymmetrically, do not let accounting detail delay the
+        # emergency delta-hedge path that runs after this method returns.
+        if hasattr(entropy, "finalize_order_info"):
+            hedge_fill_now = float(hedge_info.get("filled_base") or 0.0)
+            hedge_complete = (
+                not hedge_info.get("unresolved")
+                and hedge_info.get("err") is None
+                and abs(entropy_fill - hedge_fill_now)
+                <= cfg.net_tolerance_base
+            )
+            entropy_info = await entropy.finalize_order_info(
+                entropy_info, wait=hedge_complete)
+
+        if entropy_fill > cfg.net_tolerance_base:
+            log.info("[TIMING] %s: Entropy confirm %.0fms via %s | hedge %.0fms "
+                     "| hedge drift %+.2fbps", direction,
+                     entropy_confirm_ms,
+                     entropy_info.get("confirm_source", "rest"),
+                     hedge_elapsed_ms, hedge_drift_bps)
 
         if entropy_is_buy:
             binfo, sinfo = entropy_info, hedge_info
@@ -867,6 +912,12 @@ class Engine:
             fill_edge = matched * (sinfo["avg_px"] * (1 - plan.sell_fee)
                                    - binfo["avg_px"] * (1 + plan.buy_fee))
             self.total_fill_edge += fill_edge
+        if bfill or sfill:
+            log.info("[FILLS] %s: buy %s avg=%s | sell %s avg=%s",
+                     direction, buy.name,
+                     f"{binfo['avg_px']:.8g}" if binfo.get("avg_px") else "—",
+                     sell.name,
+                     f"{sinfo['avg_px']:.8g}" if sinfo.get("avg_px") else "—")
         log.info("[SETTLED] %s: buy %s %s %.6g/%.6g | sell %s %s %.6g/%.6g | "
                  "matched %.6g | fill edge $%.4f", direction,
                  buy.name, binfo["status"], bfill, plan.qty,

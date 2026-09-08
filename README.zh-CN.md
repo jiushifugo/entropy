@@ -49,8 +49,8 @@ midline − lower  ────────────────────�
 
 两个方向的门槛都作用于**可实际成交的价格**（Entropy 买一 对 对冲腿卖一，
 反之亦然），并且是**扣除双边吃单手续费之后的净门槛**——引擎会在阈值之上
-另行叠加手续费。因此一次完整往返扣费后**净赚 ≥ upper + lower bps**，这是
-结构上保证的。
+另行叠加手续费。每次执行还会额外叠加两腿串行延迟保护；若不发生执行滑点，
+一次完整往返扣费后会同时覆盖上下区间以及两次延迟保护。
 
 有一点必须理解：当 `midline_bps: 5` 时，买入 Entropy 的门槛是
 `lower − midline`，可能为**负数**。这是有意为之——如果 Entropy 长期贵 5 bps，
@@ -152,6 +152,7 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `sizing.max_order_notional_usd` | 单笔名义上限 | 500 |
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
+| `execution.second_leg_latency_reserve_bps` | 两腿串行期间保留的额外净溢价 | 5.0 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes.csv` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine.log` |
@@ -191,6 +192,10 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   进入仅利润模式，紧急净敞口对冲始终保留。
 - **净敞口对冲**：两腿成交不对等时立即用 reduce-only 单（带滑点保护）
   削减敞口，并每 `reconcile_sec` 与链上仓位对账。
+- **私有成交快速确认**：Entropy IOC 会同时等待签名 REST 响应和 Hyperliquid
+  `orderUpdates`。私有 WebSocket 一旦确认成交就立即发送对冲腿，REST 返回的
+  精确成交均价放到对冲之后补齐；`second_leg_latency_reserve_bps` 还会在第一腿
+  暴露前要求额外可成交净溢价。
 - **故障隔离**：被限频的交易所短暂暂停；交易所不可达（如例行维护）时暂停
   交易并每 `venue_probe_sec` 探测直至恢复；连续 `max_consecutive_errors`
   次执行异常则整体停机。

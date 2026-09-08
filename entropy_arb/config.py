@@ -150,6 +150,7 @@ class Config:
     entropy_resting_ttl_sec: float
     hedge_leg_slippage_bps: float
     slippage_reserve_bps: float
+    second_leg_latency_reserve_bps: float
     hedge_slippage_bps: float
     net_tolerance_base: float
     max_consecutive_errors: int
@@ -235,6 +236,7 @@ _SCHEMA: Dict[str, Any] = {
         "entropy_resting_ttl_sec": float,
         "hedge_leg_slippage_bps": float,
         "slippage_reserve_bps": float,
+        "second_leg_latency_reserve_bps": float,
         "hedge_slippage_bps": float,
         "net_tolerance_base": float,
         "max_consecutive_errors": int,
@@ -440,6 +442,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if not 0 <= entropy_resting_ttl_sec <= 5.0:
         raise ConfigError("execution.entropy_resting_ttl_sec must be between "
                           "0 and 5 seconds")
+    second_leg_latency_reserve_bps = float(_get(
+        raw, "execution", "second_leg_latency_reserve_bps", 5.0))
+    if second_leg_latency_reserve_bps < 0:
+        raise ConfigError("execution.second_leg_latency_reserve_bps must be "
+                          ">= 0")
     dust_flip_min_net_bps = float(_get(
         raw, "inventory", "dust_flip_min_net_bps", 0.5))
     if dust_flip_min_net_bps < 0:
@@ -480,6 +487,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_leg_slippage_bps=hedge_leg_slip,
         slippage_reserve_bps=float(_get(
             raw, "execution", "slippage_reserve_bps", 2.0)),
+        second_leg_latency_reserve_bps=second_leg_latency_reserve_bps,
         hedge_slippage_bps=float(_get(raw, "execution", "hedge_slippage_bps", 20.0)),
         net_tolerance_base=float(_get(raw, "execution", "net_tolerance_base", 0.001)),
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),

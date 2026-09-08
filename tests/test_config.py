@@ -54,6 +54,7 @@ def test_minimal_defaults():
     assert cfg.hedge.label == "LIGHTER"
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
+    assert cfg.second_leg_latency_reserve_bps == 5.0
     assert cfg.recorder_enabled is True
 
 
@@ -110,6 +111,12 @@ def test_nonpositive_band():
     expect_error("thresholds:\n"
                  "  midline_bps: 5\n  upper_bps: 0\n  lower_bps: 3\n",
                  "must be > 0")
+
+
+def test_negative_second_leg_latency_reserve_rejected():
+    expect_error(MINIMAL + "\nexecution:\n"
+                 "  second_leg_latency_reserve_bps: -0.1\n",
+                 "second_leg_latency_reserve_bps")
 
 
 if __name__ == "__main__":
