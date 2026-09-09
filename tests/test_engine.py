@@ -171,6 +171,25 @@ def test_balanced_long_dust_allows_topup_and_favorable_flip():
     assert not eng._is_dust_flip("buy_entropy", 1500.0)
 
 
+def test_paired_layers_allow_one_additional_same_direction_pair():
+    eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+    eng.cfg.max_order_notional = 22.0
+    eng.entropy.position, eng.hedge.position = 0.0122, -0.0122
+    ref = 1800.0  # existing paired notional is $21.96
+
+    # Default one layer: only the closing direction is allowed.
+    approx(eng._state_cap_notional("sell_entropy", ref), 21.96)
+    approx(eng._state_cap_notional("buy_entropy", ref), 0.0)
+
+    # A second layer permits one additional same-direction pair, but keeps
+    # reverse entries blocked and stops new entries under daily risk limits.
+    eng.cfg.max_paired_layers = 2
+    assert 0.03 < eng._state_cap_notional("buy_entropy", ref) <= 22.0
+    approx(eng._state_cap_notional("sell_entropy", ref), 21.96)
+    eng.risk_limited = True
+    approx(eng._state_cap_notional("buy_entropy", ref), 0.0)
+
+
 def test_dust_flip_requires_absolute_budgeted_net_floor():
     eng = make_engine(midline=0.0, upper=0.1, lower=0.1)
     eng._min_base, eng._min_notional = 0.01, 10.0

@@ -151,6 +151,7 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 | `sizing.take_fraction` | 吃掉可套利深度的比例 | 0.5 |
 | `sizing.max_order_notional_usd` | 单笔名义上限 | 500 |
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
+| `inventory.max_paired_layers` | 最多同方向、已完整对冲的仓位层数 | 1 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.second_leg_latency_reserve_bps` | 可选的两腿串行额外净溢价保护 | 0.0 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |

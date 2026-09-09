@@ -55,6 +55,7 @@ def test_minimal_defaults():
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
     assert cfg.second_leg_latency_reserve_bps == 0.0
+    assert cfg.max_paired_layers == 1
     assert cfg.recorder_enabled is True
 
 
@@ -117,6 +118,11 @@ def test_negative_second_leg_latency_reserve_rejected():
     expect_error(MINIMAL + "\nexecution:\n"
                  "  second_leg_latency_reserve_bps: -0.1\n",
                  "second_leg_latency_reserve_bps")
+
+
+def test_zero_paired_layers_rejected():
+    expect_error(MINIMAL + "\ninventory:\n  max_paired_layers: 0\n",
+                 "max_paired_layers")
 
 
 if __name__ == "__main__":

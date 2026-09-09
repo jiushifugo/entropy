@@ -165,6 +165,7 @@ errors), credentials in `.env`, and the markets on the command line
 | `sizing.take_fraction` | fraction of crossable depth taken | 0.5 |
 | `sizing.max_order_notional_usd` | per-slice cap | 500 |
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
+| `inventory.max_paired_layers` | maximum fully hedged same-direction layers | 1 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.second_leg_latency_reserve_bps` | optional extra net edge reserved for serial-leg latency | 0.0 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |

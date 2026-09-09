@@ -133,6 +133,7 @@ class Config:
     inventory_scale_bps: float
     inventory_floor_frac: float
     dust_flip_min_net_bps: float
+    max_paired_layers: int
     daily_loss_limit_usd: float
     daily_loss_action: str
     profit_only_min_bps: float
@@ -216,6 +217,7 @@ _SCHEMA: Dict[str, Any] = {
         "scale_bps": float,
         "floor_frac": float,
         "dust_flip_min_net_bps": float,
+        "max_paired_layers": int,
     },
     "risk": {
         "daily_loss_limit_usd": float,
@@ -451,6 +453,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raw, "inventory", "dust_flip_min_net_bps", 0.5))
     if dust_flip_min_net_bps < 0:
         raise ConfigError("inventory.dust_flip_min_net_bps must be >= 0")
+    max_paired_layers = int(_get(raw, "inventory", "max_paired_layers", 1))
+    if max_paired_layers < 1:
+        raise ConfigError("inventory.max_paired_layers must be >= 1")
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -466,6 +471,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         inventory_scale_bps=float(_get(raw, "inventory", "scale_bps", 10.0)),
         inventory_floor_frac=float(_get(raw, "inventory", "floor_frac", 0.5)),
         dust_flip_min_net_bps=dust_flip_min_net_bps,
+        max_paired_layers=max_paired_layers,
         daily_loss_limit_usd=float(_get(
             raw, "risk", "daily_loss_limit_usd", 0.0)),
         daily_loss_action=daily_loss_action,

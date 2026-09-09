@@ -293,9 +293,11 @@ class Engine:
                 + self.cfg.second_leg_latency_reserve_bps)
 
     def _state_cap_notional(self, dkey: str, ref_px: float) -> float:
-        """Allow entries only while flat; once paired inventory exists, allow
-        only the direction that reduces it, capped at flat.  An execution can
-        therefore never cross zero and silently become a reverse entry.
+        """Return the strategy notional allowed by current paired inventory.
+
+        A paired position can be closed in slices. When explicitly configured,
+        it can also add the same paired direction up to a small multiple of
+        ``max_order_notional``. Reverse entries remain blocked until flat.
 
         A partial close can leave a balanced pair below either venue's minimum
         size.  Such dust cannot be reduced directly.  While daily risk is open,
@@ -314,7 +316,14 @@ class Engine:
                 if self.risk_limited:
                     return 0.0
                 return self.cfg.max_order_notional
-            return min(epos, -hpos) * ref_px if dkey == "sell_entropy" else 0.0
+            if dkey == "sell_entropy":
+                return paired_notional
+            if self.risk_limited:
+                return 0.0
+            layer_cap = self.cfg.max_paired_layers * self.cfg.max_order_notional
+            remaining = max(layer_cap - paired_notional, 0.0)
+            return (min(self.cfg.max_order_notional, remaining)
+                    if remaining >= self._min_notional else 0.0)
         if epos < -tol and hpos > tol:
             paired_base = min(-epos, hpos)
             paired_notional = paired_base * ref_px
@@ -323,7 +332,14 @@ class Engine:
                 if self.risk_limited:
                     return 0.0
                 return self.cfg.max_order_notional
-            return min(-epos, hpos) * ref_px if dkey == "buy_entropy" else 0.0
+            if dkey == "buy_entropy":
+                return paired_notional
+            if self.risk_limited:
+                return 0.0
+            layer_cap = self.cfg.max_paired_layers * self.cfg.max_order_notional
+            remaining = max(layer_cap - paired_notional, 0.0)
+            return (min(self.cfg.max_order_notional, remaining)
+                    if remaining >= self._min_notional else 0.0)
         # Reconcile/hedge inconsistent inventory before admitting strategy flow.
         return 0.0
 

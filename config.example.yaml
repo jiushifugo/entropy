@@ -72,6 +72,10 @@ inventory:
   # Balanced dust may cross zero only when its budgeted net edge clears this.
   # 平衡尘埃仓仅在预算净收益达标时允许反向穿零；单笔金额不变。
   dust_flip_min_net_bps: 0.5
+  # Maximum same-direction, fully hedged position layers.  Leave at 1 for
+  # one pair at a time; 2 permits a second pair up to 2 × max_order_notional.
+  # 最多同方向、已完整对冲的仓位层数；1 为单层，2 为最多两层。
+  max_paired_layers: 1
 
 # ====================== DAILY RISK / 每日风控 =============================
 risk:
