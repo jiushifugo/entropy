@@ -6,11 +6,13 @@ OFFICIAL websocket (see feeds.HLBookFeed). Trading lazily imports the
 official `hyperliquid-python-sdk` signing helpers + eth_account —
 --record-only data collection needs neither.
 
-IOC orders are submitted through /exchange while a private orderUpdates
-subscription races the HTTP response.  A websocket-confirmed fill can start
-the second leg immediately; unknown outcomes (timeout/5xx) still fall back to
-orderStatus-by-cloid polling, so the engine sees the same unified result shape
-as the other venues: {status, filled_base, avg_px, err, unresolved}.
+IOC orders are submitted over the persistent private websocket when it is
+available.  The same connection also carries orderUpdates, so a
+websocket-confirmed fill can start the second leg immediately.  HTTP remains a
+fallback only when the private websocket is not ready; unknown outcomes still
+fall back to orderStatus-by-cloid polling, so the engine sees the same unified
+result shape as the other venues: {status, filled_base, avg_px, err,
+unresolved}.
 """
 from __future__ import annotations
 
@@ -63,12 +65,11 @@ class HLAccount:
 
 
 class HLOrderUpdatesFeed:
-    """Private Hyperliquid order updates keyed by client order id.
+    """Private Hyperliquid websocket for order updates and signed actions.
 
-    The REST exchange response remains the authoritative source for average
-    fill price.  This stream is the fast path for learning that the
-    Entropy-first IOC filled, allowing the engine to start the hedge before
-    the slower REST response arrives.
+    ``orderUpdates`` provides the fastest fill notification keyed by cloid.
+    Signed actions can be posted on the same connected websocket, avoiding an
+    additional HTTP request on the first-leg critical path.
     """
 
     def __init__(self, name: str, ws_url: str, user: str, coin: str,
@@ -79,6 +80,10 @@ class HLOrderUpdatesFeed:
         self.ready = asyncio.Event()
         self._pending: dict[str, asyncio.Future] = {}
         self._early: dict[str, dict] = {}
+        self._post_pending: dict[int, asyncio.Future] = {}
+        self._post_seq = int(time.time() * 1000)
+        self._ws = None
+        self._send_lock = asyncio.Lock()
 
     @staticmethod
     def _key(cloid) -> str:
@@ -99,6 +104,37 @@ class HLOrderUpdatesFeed:
         if fut is not None and not fut.done():
             fut.cancel()
 
+    async def post_action(self, payload: dict, timeout: float):
+        """Post a signed /exchange payload and await its websocket reply.
+
+        A timeout is intentionally reported as unresolved: after a successful
+        websocket send, retrying over HTTP could create a duplicate order.
+        """
+        if not self.ready.is_set() or self._ws is None:
+            return None, "private websocket not ready", False
+        loop = asyncio.get_running_loop()
+        async with self._send_lock:
+            ws = self._ws
+            if ws is None or not self.ready.is_set():
+                return None, "private websocket not ready", False
+            self._post_seq += 1
+            request_id = self._post_seq
+            reply = loop.create_future()
+            self._post_pending[request_id] = reply
+            try:
+                await ws.send(json.dumps({
+                    "method": "post", "id": request_id,
+                    "request": {"type": "action", "payload": payload},
+                }))
+            except Exception as exc:
+                self._post_pending.pop(request_id, None)
+                return None, f"websocket send failed: {exc!r}", False
+        try:
+            return await asyncio.wait_for(reply, timeout=max(timeout, 0.01))
+        except asyncio.TimeoutError:
+            self._post_pending.pop(request_id, None)
+            return None, None, True
+
     def _resolve(self, cloid: str, info: dict) -> None:
         key = self._key(cloid)
         if not key:
@@ -113,6 +149,22 @@ class HLOrderUpdatesFeed:
 
     def _handle_message(self, msg: dict) -> None:
         channel = msg.get("channel")
+        if channel == "post":
+            data = msg.get("data") or {}
+            try:
+                request_id = int(data.get("id"))
+            except (TypeError, ValueError):
+                return
+            fut = self._post_pending.pop(request_id, None)
+            if fut is None or fut.done():
+                return
+            response = data.get("response") or {}
+            if response.get("type") == "action":
+                fut.set_result((response.get("payload"), None, False))
+            else:
+                fut.set_result((None, str(response.get("payload") or response),
+                                False))
+            return
         if channel == "subscriptionResponse":
             sub = (msg.get("data") or {}).get("subscription") or {}
             if (sub.get("type") == "orderUpdates"
@@ -180,6 +232,7 @@ class HLOrderUpdatesFeed:
                 async with ws_connect(self.ws_url, max_size=2**23,
                                       open_timeout=10, ping_interval=15,
                                       ping_timeout=15) as ws:
+                    self._ws = ws
                     await ws.send(json.dumps({
                         "method": "subscribe",
                         "subscription": {
@@ -200,6 +253,15 @@ class HLOrderUpdatesFeed:
             finally:
                 if ptask is not None:
                     ptask.cancel()
+                if self._ws is not None:
+                    self._ws = None
+                for fut in self._post_pending.values():
+                    if not fut.done():
+                        # The request may have reached the exchange.  Force
+                        # the caller into conservative reconciliation rather
+                        # than permitting a duplicate HTTP retry.
+                        fut.set_result((None, None, True))
+                self._post_pending.clear()
             self.ready.clear()
             if not stop.is_set():
                 await asyncio.sleep(backoff)
@@ -547,9 +609,17 @@ class HLVenue:
                     "err": f"signing failed: {e!r}", "unresolved": False}
 
         cloid_raw = cloid.to_raw()
-        ws_fut = (self.order_feed.watch(cloid_raw)
-                  if self.order_feed is not None else None)
-        post_task = asyncio.create_task(self._post_exchange(payload))
+        feed = self.order_feed
+        ws_fut = feed.watch(cloid_raw) if feed is not None else None
+        if feed is not None and feed.ready.is_set():
+            post_task = asyncio.create_task(
+                feed.post_action(payload, self.settle_timeout))
+            post_source = "ws-post"
+        else:
+            # Do not fall back after a websocket send: its outcome is unknown
+            # on disconnect/timeout and an HTTP retry could duplicate it.
+            post_task = asyncio.create_task(self._post_exchange(payload))
+            post_source = "rest"
         mono_deadline = time.monotonic() + self.settle_timeout
         waiters = {post_task}
         if ws_fut is not None:
@@ -565,8 +635,8 @@ class HLVenue:
             await asyncio.gather(post_task, return_exceptions=True)
             raise
 
-        # The private stream is the risk fast path.  It confirms quantity so
-        # the engine can hedge immediately; the still-running REST task is
+        # The private stream is the risk fast path. It confirms quantity so
+        # the engine can hedge immediately; the still-running action reply is
         # retained only for the authoritative average fill price.
         if ws_fut is not None and ws_fut in done:
             info = ws_fut.result()
@@ -580,7 +650,7 @@ class HLVenue:
                 except Exception:
                     pass
             elif float(info.get("filled_base") or 0.0) > 0:
-                info["_rest_detail_task"] = post_task
+                info["_detail_task"] = post_task
             else:
                 post_task.cancel()
                 await asyncio.gather(post_task, return_exceptions=True)
@@ -596,13 +666,13 @@ class HLVenue:
                     self.order_feed.unwatch(cloid_raw)
                 return {"status": "send-failed", "filled_base": 0.0,
                         "avg_px": None, "err": err, "unresolved": False,
-                        "confirm_source": "rest"}
+                        "confirm_source": post_source}
             if not unresolved:
                 res = self._parse(body)
                 if not res.get("unresolved"):
                     if ws_fut is not None:
                         self.order_feed.unwatch(cloid_raw)
-                    res["confirm_source"] = "rest"
+                    res["confirm_source"] = post_source
                     return res
             if ws_fut is not None:
                 remaining = max(mono_deadline - time.monotonic(), 0.0)
@@ -645,12 +715,12 @@ class HLVenue:
                 "confirm_source": "timeout"}
 
     async def finalize_order_info(self, info: dict, *, wait: bool = True) -> dict:
-        """Fill in REST average price after fast websocket confirmation.
+        """Fill in average price after fast websocket confirmation.
 
         The engine calls this after sending the mandatory hedge, so waiting
         for accounting detail can never delay the risk-reducing second leg.
         """
-        task = info.pop("_rest_detail_task", None)
+        task = info.pop("_detail_task", None)
         if task is None:
             return info
         if not wait:
@@ -665,7 +735,7 @@ class HLVenue:
                 if detailed.get("avg_px") is not None:
                     info["avg_px"] = detailed["avg_px"]
         except Exception as exc:
-            log.debug("[%s] REST fill detail unavailable: %r", self.name, exc)
+            log.debug("[%s] order fill detail unavailable: %r", self.name, exc)
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)

@@ -24,6 +24,15 @@ class FakeSigning:
         return {"r": "0x1", "s": "0x2", "v": 27}
 
 
+class FakeWs:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        import json
+        self.sent.append(json.loads(payload))
+
+
 def test_managed_limit_cancels_then_reports_partial_fill():
     async def go():
         venue = object.__new__(HLVenue)
@@ -108,7 +117,30 @@ def test_order_updates_feed_resolves_final_ioc_by_cloid():
     asyncio.run(go())
 
 
-def test_taker_uses_ws_fill_before_rest_detail():
+def test_order_updates_feed_posts_signed_action_on_same_websocket():
+    async def go():
+        feed = HLOrderUpdatesFeed(
+            "ENTROPY", "ws://unused", "0x" + "1" * 40, "io:SNDK")
+        ws = FakeWs()
+        feed._ws = ws
+        feed.ready.set()
+        task = asyncio.create_task(feed.post_action({"action": {"type": "order"}}, 0.2))
+        await asyncio.sleep(0)
+        request = ws.sent[0]
+        assert request["method"] == "post"
+        assert request["request"]["type"] == "action"
+        feed._handle_message({
+            "channel": "post",
+            "data": {"id": request["id"], "response": {
+                "type": "action", "payload": {"status": "ok"},
+            }},
+        })
+        assert await task == ({"status": "ok"}, None, False)
+
+    asyncio.run(go())
+
+
+def test_taker_uses_ws_fill_before_ws_post_detail():
     async def go():
         venue = object.__new__(HLVenue)
         venue.account = SimpleNamespace(
@@ -123,15 +155,16 @@ def test_taker_uses_ws_fill_before_rest_detail():
         feed = HLOrderUpdatesFeed(
             "ENTROPY", "ws://unused", venue.account.query_address,
             venue.coin)
+        feed.ready.set()
         venue.order_feed = feed
 
-        async def post(_payload):
+        async def post(_payload, _timeout):
             await asyncio.sleep(0.15)
             return ({"status": "ok", "response": {"data": {"statuses": [
                 {"filled": {"totalSz": "0.0123", "avgPx": "100.25"}}
             ]}}}, None, False)
 
-        venue._post_exchange = post
+        feed.post_action = post
         loop = asyncio.get_running_loop()
         loop.call_later(0.01, feed._resolve, "0xabc", {
             "status": "filled", "filled_base": 0.0123, "avg_px": None,
@@ -143,15 +176,15 @@ def test_taker_uses_ws_fill_before_rest_detail():
         assert time.perf_counter() - started < 0.10
         assert result["filled_base"] == 0.0123
         assert result["avg_px"] is None
-        assert "_rest_detail_task" in result
+        assert "_detail_task" in result
         result = await venue.finalize_order_info(result)
         assert result["avg_px"] == 100.25
-        assert "_rest_detail_task" not in result
+        assert "_detail_task" not in result
 
     asyncio.run(go())
 
 
-def test_finalize_can_drop_slow_rest_detail_without_waiting():
+def test_finalize_can_drop_slow_detail_without_waiting():
     async def go():
         venue = object.__new__(HLVenue)
         venue.name = "ENTROPY"
@@ -165,12 +198,12 @@ def test_finalize_can_drop_slow_rest_detail_without_waiting():
         info = {
             "status": "filled", "filled_base": 0.0123, "avg_px": None,
             "err": None, "unresolved": False, "confirm_source": "ws",
-            "_rest_detail_task": task,
+            "_detail_task": task,
         }
         started = time.perf_counter()
         result = await venue.finalize_order_info(info, wait=False)
         assert time.perf_counter() - started < 0.10
         assert task.cancelled()
-        assert "_rest_detail_task" not in result
+        assert "_detail_task" not in result
 
     asyncio.run(go())
