@@ -54,7 +54,7 @@ def test_minimal_defaults():
     assert cfg.hedge.label == "LIGHTER"
     assert cfg.hedge.lighter_profile.chain_id == 304
     assert cfg.take_fraction == 0.5          # defaults kick in
-    assert cfg.second_leg_latency_reserve_bps == 5.0
+    assert cfg.second_leg_latency_reserve_bps == 0.0
     assert cfg.recorder_enabled is True
 
 

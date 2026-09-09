@@ -26,6 +26,8 @@ thresholds:
   midline_bps: 2.0
   upper_bps: 4.0
   lower_bps: 3.0
+execution:
+  second_leg_latency_reserve_bps: 5.0
 """)
     f.close()
     return load_config(f.name, NO_ENV,

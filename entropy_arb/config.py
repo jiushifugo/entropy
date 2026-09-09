@@ -443,7 +443,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("execution.entropy_resting_ttl_sec must be between "
                           "0 and 5 seconds")
     second_leg_latency_reserve_bps = float(_get(
-        raw, "execution", "second_leg_latency_reserve_bps", 5.0))
+        raw, "execution", "second_leg_latency_reserve_bps", 0.0))
     if second_leg_latency_reserve_bps < 0:
         raise ConfigError("execution.second_leg_latency_reserve_bps must be "
                           ">= 0")

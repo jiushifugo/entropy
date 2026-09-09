@@ -27,8 +27,8 @@
 #   BUY entropy + SELL hedge   when executable premium <= midline - lower
 #
 # Both hurdles are net of taker fees (the engine adds fees on top).  The
-# execution section also adds a per-leg latency reserve for serial settlement.
-# 两侧门槛均为扣除手续费后的净值；执行参数还会为两腿串行结算增加延迟保护。
+# optional latency reserve is disabled unless you explicitly set it.
+# 两侧门槛均为扣除手续费后的净值；延迟保护默认关闭，需显式开启。
 #
 # midline_bps is a number YOU derive from recorded data. Run the bot
 # (--record-only) to collect logs/minutes.csv, then:  python3 tools/analyze.py
@@ -102,10 +102,10 @@ execution:
   entropy_resting_ttl_sec: 1.0
   hedge_leg_slippage_bps: 0.5   # normal hedge-venue leg protection / 对冲交易所正常腿
   slippage_reserve_bps: 0.2     # expected edge retained after max slippage / 保留净收益
-  # Extra net edge required before sending the first leg.  This protects the
-  # serial Entropy -> hedge path from book movement while Entropy settles.
-  # 第一腿下单前额外保留的净溢价，用于覆盖 Entropy 确认期间第二腿盘口移动。
-  second_leg_latency_reserve_bps: 5.0
+  # Optional extra net edge before the first leg, for measured serial-leg
+  # latency.  Keep 0 until enough live fills establish a suitable value.
+  # 可选的第一腿延迟保护；积累足够实盘成交数据前请保持 0。
+  second_leg_latency_reserve_bps: 0.0
   hedge_slippage_bps: 20.0     # price protection on delta hedges / 对冲滑点保护
   net_tolerance_base: 0.001    # max tolerated net delta (base units) / 允许的净敞口
   max_consecutive_errors: 3    # halt after N straight failures / 连续失败 N 次后停机
