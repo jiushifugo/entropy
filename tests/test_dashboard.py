@@ -93,10 +93,11 @@ def test_renders_key_numbers():
                    "$+10.00", "LIVE", "s ago"):
         assert needle in out, f"{needle!r} missing from render"
     assert "render error" not in out
-    # signal math: sell hurdle = midline+upper = +6 (zero fees, flat books)
+    # This setup is closing the existing long Entropy pair, so its sell
+    # hurdle uses midline - exit_bps + the 5 bps latency reserve = +6.5.
+    assert "+6.50" in out
+    # The reverse entry hurdle is lower - midline + reserve = +6.
     assert "+6.00" in out
-    # buy hurdle = lower - midline = +1
-    assert "+1.00" in out
 
 
 def test_renders_in_chinese():
@@ -111,8 +112,11 @@ def test_renders_in_chinese():
                    "卖出 entropy → 买入 RH", "买入 entropy → 卖出 RH",
                    "门槛 bps", "暂无执行", "日志事件", "秒前"):
         assert needle in out, f"{needle!r} missing from zh render"
-    # numbers unchanged by translation: sell hurdle midline+upper = +6
-    assert "+6.00" in out
+    # Numbers are unchanged by translation; this is a flat entry, so the
+    # sell hurdle is midline + upper + 5 bps reserve = +11.
+    eng.entropy.position = eng.hedge.position = 0.0
+    out = render(eng, lang="zh")
+    assert "+11.00" in out
     # English render untouched by the zh table
     out_en = render(eng, lang="en")
     assert "session" in out_en and "会话" not in out_en

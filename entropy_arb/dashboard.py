@@ -322,14 +322,15 @@ class Dashboard:
         return Panel(g, title=self._t("session"), box=box.ROUNDED,
                      padding=(0, 1))
 
-    def _dir_row(self, t: Table, label: str, buy, sell, hurdle_bps: float,
-                 armed_key: str) -> None:
+    def _dir_row(self, t: Table, label: str, buy, sell, armed_key: str) -> None:
         """One direction: executable premium vs its full hurdle (fees and
         inventory surcharge included)."""
         eng = self.eng
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
-        hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
-                  + eng._inv_add_bps(buy, sell))
+        # Use the exact admission hurdle used by Engine._plan(), including
+        # the serial-leg latency reserve.  Duplicating this calculation here
+        # previously made the dashboard show a lower, misleading threshold.
+        hurdle = eng._eff_threshold(buy, sell) + buy.fee_bps + sell.fee_bps
         if not (ba and sb):
             t.add_row(label, Text("—", style="dim"),
                       f"{hurdle:+.1f}", Text("—", style="dim"), "")
@@ -362,11 +363,9 @@ class Dashboard:
         t.add_column(self._t("gap bps"), justify="right")
         t.add_column("", justify="left")
         self._dir_row(t, self._t("SELL entropy → buy {h}", h=eng.hedge.name),
-                      eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
+                      eng.hedge, eng.entropy, "sell_entropy")
         self._dir_row(t, self._t("BUY entropy → sell {h}", h=eng.hedge.name),
-                      eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+                      eng.entropy, eng.hedge, "buy_entropy")
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),
