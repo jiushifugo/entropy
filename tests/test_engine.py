@@ -129,6 +129,23 @@ def test_entropy_resting_edge_guard_tracks_hedge_book():
         entropy_is_buy=False, entropy=e, hedge=h, entropy_limit=100.03)
 
 
+def test_emergency_hedge_uses_venue_minimum_not_strategy_minimum():
+    async def go():
+        eng = make_engine()
+        eng.cfg.min_order_notional = 20.0
+        e, h = eng.entropy, eng.hedge
+        e.set_book(1764.0, 1764.2)
+        h.set_book(1764.0, 1764.2)
+        # $19.94 is below the strategy's $20 entry floor, but above the
+        # venue's $10 minimum and must be flattened by the emergency hedge.
+        e.position, h.position = 0.0113, 0.0
+        await eng._maybe_hedge()
+        assert abs(e.position) < 1e-9
+        assert eng.hedges == 1
+
+    asyncio.run(go())
+
+
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5

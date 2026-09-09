@@ -1026,7 +1026,13 @@ class Engine:
                 continue
             limit = v.px_round(ref * (1 - slip), False) if is_sell \
                 else v.px_round(ref * (1 + slip), True)
-            if qty * limit < max(cfg.min_order_notional, v.min_quote):
+            # This is risk reduction, not a strategy entry.  A residual may
+            # fall just below the configured strategy minimum after a partial
+            # hedge (for example $19.94 with a $20 strategy floor), while it
+            # remains perfectly executable at the venue's actual minimum.
+            # Never leave that directional exposure merely to preserve an
+            # entry-size preference.
+            if qty * limit < v.min_quote:
                 continue
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
