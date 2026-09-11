@@ -43,6 +43,7 @@ def test_managed_limit_cancels_then_reports_partial_fill():
         venue.settle_timeout = 0.2
         venue._signing = FakeSigning()
         venue._signed_payload = lambda action: {"action": action}
+        venue.order_feed = None
 
         async def post(_payload):
             return ({"status": "ok", "response": {"data": {"statuses": [
@@ -72,6 +73,40 @@ def test_managed_limit_cancels_then_reports_partial_fill():
         assert result["status"] == "canceled"
         assert result["filled_base"] == 0.004
         assert not result["unresolved"]
+        assert result["confirm_source"] == "rest"
+
+    asyncio.run(go())
+
+
+def test_managed_limit_prefers_private_websocket_submission():
+    async def go():
+        venue = object.__new__(HLVenue)
+        venue.account = object()
+        venue.asset_id = 110000
+        venue.coin = "io:SNDK"
+        venue.name = "ENTROPY"
+        venue.settle_timeout = 0.2
+        venue._signing = FakeSigning()
+        venue._signed_payload = lambda action: {"action": action}
+        ready = asyncio.Event()
+        ready.set()
+
+        async def ws_post(_payload, _timeout):
+            return ({"status": "ok", "response": {"data": {"statuses": [
+                {"resting": {"oid": 7}}
+            ]}}}, None, False)
+
+        venue.order_feed = SimpleNamespace(ready=ready, post_action=ws_post)
+        venue._post_exchange = lambda _payload: (_ for _ in ()).throw(
+            AssertionError("HTTP should not be used"))
+        venue._order_status = lambda _oid: asyncio.sleep(
+            0, result={"status": "canceled", "filled_base": 0.0,
+                       "avg_px": None, "err": None, "unresolved": False})
+        venue._cancel_by_oid = lambda _oid: asyncio.sleep(0, result=None)
+        result = await venue.send_managed_limit(
+            is_buy=True, qty=0.01, limit_px=100.0, ttl_sec=0.01,
+            keep_open=lambda: True)
+        assert result["confirm_source"] == "ws-post"
 
     asyncio.run(go())
 

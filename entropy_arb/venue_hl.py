@@ -442,12 +442,28 @@ class HLVenue:
             payload = self._signed_payload(action)
         except Exception as e:
             return f"cancel signing failed: {e!r}"
-        _body, err, unresolved = await self._post_exchange(payload)
+        _body, err, unresolved, _source = await self._post_action(payload)
         if err is not None:
             return err
         if unresolved:
             return "cancel outcome unknown"
         return None
+
+    async def _post_action(self, payload: dict):
+        """Submit an exchange action on the private websocket when ready.
+
+        Managed GTC orders and their cancellations are latency-sensitive too;
+        sending only IOC orders over websocket left maker mode on the slower
+        HTTP path.  Once a websocket send is attempted we do not retry it via
+        HTTP, since that could duplicate an accepted action.
+        """
+        feed = self.order_feed
+        if feed is not None and feed.ready.is_set():
+            body, err, unresolved = await feed.post_action(
+                payload, self.settle_timeout)
+            return body, err, unresolved, "ws-post"
+        body, err, unresolved = await self._post_exchange(payload)
+        return body, err, unresolved, "rest"
 
     @staticmethod
     def _resting_oid(body: dict) -> Optional[int]:
@@ -521,17 +537,23 @@ class HLVenue:
                     "avg_px": None, "err": f"signing failed: {e!r}",
                     "unresolved": False}
 
-        body, err, unresolved = await self._post_exchange(payload)
+        body, err, unresolved, post_source = await self._post_action(payload)
+
+        def with_source(info: dict) -> dict:
+            info.setdefault("confirm_source", post_source)
+            return info
+
         if err is not None:
-            return {"status": "send-failed", "filled_base": 0.0,
-                    "avg_px": None, "err": err, "unresolved": False}
+            return with_source({"status": "send-failed", "filled_base": 0.0,
+                                "avg_px": None, "err": err,
+                                "unresolved": False})
         oid = None
         if not unresolved:
             parsed = self._parse(body)
             if parsed.get("status") == "filled":
-                return parsed
+                return with_source(parsed)
             if parsed.get("err") is not None:
-                return parsed
+                return with_source(parsed)
             oid = self._resting_oid(body)
         if oid is None:
             oid = await self._find_matching_open_order(
@@ -540,8 +562,9 @@ class HLVenue:
         if oid is None:
             # It may have filled or been accepted without a discoverable open
             # order.  Do not submit or cancel anything else; force reconcile.
-            return {"status": "submit-unresolved", "filled_base": 0.0,
-                    "avg_px": None, "err": None, "unresolved": True}
+            return with_source({"status": "submit-unresolved",
+                                "filled_base": 0.0, "avg_px": None,
+                                "err": None, "unresolved": True})
 
         deadline = time.monotonic() + max(ttl_sec, 0.0)
         last_seen = None
@@ -551,7 +574,7 @@ class HLVenue:
             if status is not None:
                 last_seen = status
                 if status["status"] != "open":
-                    return status
+                    return with_source(status)
                 if float(status.get("filled_base") or 0.0) > 0:
                     # Stop accumulating one-leg exposure: cancel the
                     # remainder, then let the engine hedge this partial fill.
@@ -578,14 +601,14 @@ class HLVenue:
             if status is not None:
                 last_seen = status
                 if status["status"] != "open":
-                    return status
+                    return with_source(status)
             await asyncio.sleep(0.20)
         # Never claim a clean cancellation when the final chain state is not
         # known: the engine will reconcile and pause strategy flow.
         filled = float((last_seen or {}).get("filled_base") or 0.0)
-        return {"status": "cancel-timeout", "filled_base": filled,
-                "avg_px": None, "err": cancel_err,
-                "unresolved": True}
+        return with_source({"status": "cancel-timeout", "filled_base": filled,
+                            "avg_px": None, "err": cancel_err,
+                            "unresolved": True})
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:
