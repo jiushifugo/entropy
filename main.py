@@ -22,6 +22,7 @@ README.zh-CN.md (中文).
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import logging
 import os
 import signal
@@ -29,6 +30,52 @@ import sys
 
 from entropy_arb.config import HEDGE_VENUES, ConfigError, load_config
 from entropy_arb.engine import Engine
+
+
+class SingleInstanceLock:
+    """Advisory process lock for one live symbol/hedge pair.
+
+    The file stays on disk after shutdown; its *lock* (not its presence) is
+    what controls ownership.  This makes a stale file harmless after a crash.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._fh = None
+
+    def acquire(self) -> None:
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        fh = open(self.path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.seek(0)
+            owner = fh.read().strip() or "another process"
+            fh.close()
+            raise RuntimeError(
+                "live strategy already running for this symbol/hedge pair "
+                f"({owner}); stop it before starting another instance")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"pid={os.getpid()}\n")
+        fh.flush()
+        self._fh = fh
+
+    def release(self) -> None:
+        if self._fh is None:
+            return
+        with contextlib.suppress(OSError):
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
+        self._fh = None
+
+
+def live_lock_path(config_path: str, symbol: str, hedge: str) -> str:
+    """Return a lock path shared by live launches from this config directory."""
+    directory = os.path.abspath(os.path.dirname(config_path) or ".")
+    safe_symbol = "".join(c for c in symbol.upper() if c.isalnum() or c in "_-")
+    safe_hedge = "".join(c for c in hedge.lower() if c.isalnum() or c in "_-")
+    return os.path.join(directory, f".entropy-arb-{safe_symbol}-{safe_hedge}.lock")
 
 
 def setup_logging(level: str, log_file: str = None,
@@ -130,7 +177,13 @@ def main() -> None:
     else:
         setup_logging(cfg.log_level)
 
+    instance_lock = None
+    if not args.record_only:
+        instance_lock = SingleInstanceLock(
+            live_lock_path(args.config, args.symbol, args.hedge))
     try:
+        if instance_lock is not None:
+            instance_lock.acquire()
         asyncio.run(amain(cfg, record_only=args.record_only,
                           use_dashboard=use_dashboard, force_tty=force_tty,
                           log_buffer=log_buffer,
@@ -140,6 +193,9 @@ def main() -> None:
         # unreachable) — a clean message, not a traceback
         print(f"startup error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        if instance_lock is not None:
+            instance_lock.release()
 
 
 if __name__ == "__main__":
