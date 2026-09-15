@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -142,6 +143,42 @@ def test_emergency_hedge_uses_venue_minimum_not_strategy_minimum():
         await eng._maybe_hedge()
         assert abs(e.position) < 1e-9
         assert eng.hedges == 1
+
+    asyncio.run(go())
+
+
+def test_next_eligible_pair_merges_subminimum_residual():
+    async def go():
+        eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+        eng.cfg.max_order_notional = 22.0
+        eng.cfg.entropy_retry_once = False
+        eng.entropy.set_book(100.20, 100.30)
+        eng.hedge.set_book(99.90, 100.00)
+        # A $4.10 hedge short is below the venue's $10 minimum.  It cannot be
+        # closed alone, but a sell-Entropy / buy-hedge pair can absorb it.
+        eng.hedge.position = -0.041
+        assert eng._state_cap_notional("sell_entropy", 100.0) == 22.0
+        eng._scan(time.time())  # arm the zero-persistence signal
+        buy, sell, plan = eng._scan(time.time())
+        assert buy is eng.hedge and sell is eng.entropy
+
+        sent = []
+        original = eng.hedge.send_taker
+
+        async def hedge_send(**kwargs):
+            sent.append(kwargs)
+            return await original(**kwargs)
+
+        eng.hedge.send_taker = hedge_send
+        await eng._execute(buy, sell, plan)
+
+        # The hedge buy is one normal pair plus the old 0.041 short, yielding
+        # a balanced short-Entropy / long-hedge pair with no naked residual.
+        approx(eng.entropy.position, -plan.qty)
+        approx(eng.hedge.position, plan.qty)
+        approx(sent[0]["qty"], plan.qty + 0.041)
+        assert eng.consec_errors == 0
+        assert eng.trades == 1
 
     asyncio.run(go())
 

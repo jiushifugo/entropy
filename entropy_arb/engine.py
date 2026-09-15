@@ -340,8 +340,36 @@ class Engine:
             remaining = max(layer_cap - paired_notional, 0.0)
             return (min(self.cfg.max_order_notional, remaining)
                     if remaining >= self._min_notional else 0.0)
+        # A one-leg partial fill can leave a small net residual which is below
+        # the venue's minimum order size.  Do not strand it forever: permit
+        # one otherwise-valid normal slice, whose hedge leg will absorb the
+        # residual in _execute.  This never emits a standalone correction
+        # order and is intentionally limited to sub-minimum residuals.
+        net = epos + hpos
+        venue_min = min(self.entropy.min_quote, self.hedge.min_quote)
+        if (abs(net) > tol and ref_px > 0
+                and abs(net) * ref_px < venue_min):
+            return self.cfg.max_order_notional
         # Reconcile/hedge inconsistent inventory before admitting strategy flow.
         return 0.0
+
+    def _hedge_target_after_entropy_fill(self, entropy_is_buy: bool,
+                                         entropy_fill: float):
+        """Return the hedge order that restores net delta after a first-leg fill.
+
+        Normally both legs use the same quantity.  If a prior partial fill
+        left a tiny, venue-untradeable residual, the next eligible pair folds
+        that residual into its hedge leg.  The strategy still has to clear its
+        usual entry checks; this is not a free-standing correction trade.
+        """
+        net_before = self.entropy.position + self.hedge.position
+        entropy_delta = entropy_fill if entropy_is_buy else -entropy_fill
+        hedge_delta = -(net_before + entropy_delta)
+        hedge_is_buy = hedge_delta > 0
+        qty = floor_step(abs(hedge_delta), self._step)
+        normal_qty = floor_step(entropy_fill, self._step)
+        merged = abs(qty - normal_qty) > self.cfg.net_tolerance_base
+        return qty, hedge_is_buy, merged, net_before
 
     def _is_dust_flip(self, dkey: str, ref_px: float) -> bool:
         """True when ``dkey`` crosses a balanced sub-minimum pair through 0."""
@@ -838,11 +866,18 @@ class Engine:
         hedge_info = failed_info(status="skipped-no-entropy-fill")
         hedge_elapsed_ms = 0.0
         hedge_drift_bps = 0.0
+        hedge_requested_qty = 0.0
         if (entropy_fill > cfg.net_tolerance_base
                 and not entropy_info.get("unresolved")
                 and entropy_info.get("err") is None):
-            hedge_qty = floor_step(entropy_fill, self._step)
-            hedge_is_buy = not entropy_is_buy
+            hedge_qty, hedge_is_buy, merged_residual, prior_net = \
+                self._hedge_target_after_entropy_fill(entropy_is_buy,
+                                                      entropy_fill)
+            hedge_requested_qty = hedge_qty
+            if merged_residual:
+                log.warning("[RESIDUAL MERGE] %s: prior net %+.6g; hedge "
+                            "%.6g instead of %.6g to restore net zero",
+                            direction, prior_net, hedge_qty, entropy_fill)
             ref = hedge.book.best_ask() if hedge_is_buy else hedge.book.best_bid()
             planned_hedge_px = (plan.buy_limit if hedge_is_buy
                                 else plan.sell_limit)
@@ -889,7 +924,7 @@ class Engine:
             hedge_complete = (
                 not hedge_info.get("unresolved")
                 and hedge_info.get("err") is None
-                and abs(entropy_fill - hedge_fill_now)
+                and abs(hedge_requested_qty - hedge_fill_now)
                 <= cfg.net_tolerance_base
             )
             entropy_info = await entropy.finalize_order_info(
@@ -957,7 +992,11 @@ class Engine:
         # error counter and lets the strategy churn emergency hedges forever.
         # _execute_locked() still calls _maybe_hedge() after this method, so
         # the exposure is reduced before a configured halt takes effect.
-        asymmetric_fill = abs(bfill - sfill) > cfg.net_tolerance_base
+        # Leg fills can intentionally differ when a sub-minimum residual is
+        # merged into this pair.  What matters is the account's resulting
+        # net delta, not equality of this pair's two raw fill quantities.
+        post_net = sum(v.position for v in self.venues.values())
+        asymmetric_fill = abs(post_net) > cfg.net_tolerance_base
         sent_ok = not hard_err and not unresolved and not asymmetric_fill
         if asymmetric_fill:
             log.error("[ASYMMETRIC FILL] buy %.6g / sell %.6g — "
