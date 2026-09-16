@@ -208,6 +208,22 @@ def test_explicit_residual_repair_runs_once_without_an_arb_edge():
     asyncio.run(go())
 
 
+def test_residual_repair_handles_base_minimum_dust_above_quote_minimum():
+    """ARCUS-like dust can clear the USD floor but miss the base floor."""
+    eng = make_engine(midline=0.0, upper=10.0, lower=10.0)
+    eng.cfg.max_order_notional = 22.0
+    eng.cfg.residual_repair_once = True
+    eng.entropy.set_book(100.00, 100.10)
+    eng.hedge.set_book(100.00, 100.10)
+    eng.hedge.min_quote = 5.0
+    eng.hedge.min_base = 0.10
+    eng.hedge.position = -0.06  # $6 meets quote minimum, not base minimum
+
+    buy, sell, plan = eng._scan(time.time())
+    assert buy is eng.hedge and sell is eng.entropy
+    assert plan.buy_notional >= eng._min_notional
+
+
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5

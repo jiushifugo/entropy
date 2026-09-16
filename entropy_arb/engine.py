@@ -445,8 +445,15 @@ class Engine:
         # independently closeable merely because Entropy accepts smaller
         # orders.
         residual_venue = self.entropy if abs(epos) > cfg.net_tolerance_base else self.hedge
-        venue_min = residual_venue.min_quote
-        if (ref is None or abs(net) * ref >= venue_min
+        # A venue can reject dust by base quantity even when its USD value is
+        # above ``min_quote`` (the current ARCUS residual is exactly such a
+        # case).  It is independently closeable only when *both* venue
+        # minima are met.
+        independently_closeable = (
+            abs(net) + 1e-12 >= residual_venue.min_base
+            and abs(net) * ref >= residual_venue.min_quote
+        ) if ref is not None else False
+        if (ref is None or independently_closeable
                 or (abs(epos) > cfg.net_tolerance_base
                     and abs(hpos) > cfg.net_tolerance_base)):
             return None
