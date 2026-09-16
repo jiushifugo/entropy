@@ -439,7 +439,13 @@ class Engine:
         # Only repair a genuine one-leg, venue-untradeable residual.  Larger
         # or paired exposures must retain normal strategy/risk handling.
         ref = self.entropy.book.mid() or self.hedge.book.mid()
-        venue_min = min(self.entropy.min_quote, self.hedge.min_quote)
+        # Test the residual against the minimum of the venue that actually
+        # holds it.  Using the lower minimum across both venues can wrongly
+        # classify (for example) an untradeable Arcus dust position as
+        # independently closeable merely because Entropy accepts smaller
+        # orders.
+        residual_venue = self.entropy if abs(epos) > cfg.net_tolerance_base else self.hedge
+        venue_min = residual_venue.min_quote
         if (ref is None or abs(net) * ref >= venue_min
                 or (abs(epos) > cfg.net_tolerance_base
                     and abs(hpos) > cfg.net_tolerance_base)):
