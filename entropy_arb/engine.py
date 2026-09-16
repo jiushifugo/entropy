@@ -18,6 +18,7 @@ import asyncio
 import csv
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -95,6 +96,7 @@ class Engine:
         self.profit_only = False
         self.risk_limited = False
         self._risk_halted = False
+        self._residual_repair_attempted = False
 
     # ------------------------------------------------------------- utilities
 
@@ -418,6 +420,66 @@ class Engine:
             size_step=self._step,
         )
 
+    def _residual_repair_plan(self):
+        """Build one explicitly requested minimum pair to absorb tiny dust.
+
+        This is deliberately opt-in and only applies when one venue carries a
+        sub-minimum, unpaired residual.  The normal strategy's price edge is
+        not required, so the operator must explicitly accept spread/fee loss
+        by enabling ``execution.residual_repair_once``.
+        """
+        cfg = self.cfg
+        if (not cfg.residual_repair_once or self._residual_repair_attempted
+                or self.halted or self.risk_limited):
+            return None
+        epos, hpos = self.entropy.position, self.hedge.position
+        net = epos + hpos
+        if abs(net) <= cfg.net_tolerance_base:
+            return None
+        # Only repair a genuine one-leg, venue-untradeable residual.  Larger
+        # or paired exposures must retain normal strategy/risk handling.
+        ref = self.entropy.book.mid() or self.hedge.book.mid()
+        venue_min = min(self.entropy.min_quote, self.hedge.min_quote)
+        if (ref is None or abs(net) * ref >= venue_min
+                or (abs(epos) > cfg.net_tolerance_base
+                    and abs(hpos) > cfg.net_tolerance_base)):
+            return None
+        if not (self.entropy.ready_to_trade() and self.hedge.ready_to_trade()
+                and self.entropy.book.is_fresh(cfg.staleness_sec)
+                and self.hedge.book.is_fresh(cfg.staleness_sec)):
+            return None
+        # A positive residual is repaired by buying Entropy / selling hedge;
+        # a negative residual by selling Entropy / buying hedge.  The hedge
+        # target calculation in _execute adds exactly the old net residual.
+        buy, sell = ((self.entropy, self.hedge) if net > 0
+                     else (self.hedge, self.entropy))
+        buy_px, sell_px = buy.book.best_ask(), sell.book.best_bid()
+        if buy_px is None or sell_px is None:
+            return None
+        need = max(self._min_base,
+                   self._min_notional / buy_px,
+                   self._min_notional / sell_px)
+        qty = round(math.ceil((need - 1e-12) / self._step) * self._step, 12)
+        if qty * buy_px > cfg.max_order_notional + 1e-9:
+            log.error("[RESIDUAL REPAIR] minimum pair $%.2f exceeds configured "
+                      "per-order cap $%.2f; not sent", qty * buy_px,
+                      cfg.max_order_notional)
+            self._residual_repair_attempted = True
+            return None
+        self._residual_repair_attempted = True
+        direction = "buy_entropy" if buy.key == "entropy" else "sell_entropy"
+        log.warning("[RESIDUAL REPAIR] %s: absorbing net %+.6g with one "
+                    "minimum $%.2f pair; normal edge gate intentionally "
+                    "bypassed", direction, net, qty * buy_px)
+        return buy, sell, ArbPlan(
+            qty=qty, buy_limit=buy_px, sell_limit=sell_px,
+            buy_notional=qty * buy_px, sell_notional=qty * sell_px,
+            q_max=qty, q_max_notional=qty * buy_px,
+            top_premium_bps=(sell_px / buy_px - 1.0) * 1e4,
+            marginal_premium_bps=(sell_px / buy_px - 1.0) * 1e4,
+            buy_fee=buy.fee_bps / 1e4, sell_fee=sell.fee_bps / 1e4,
+        )
+
     # -------------------------------------------------------------- strategy
 
     async def _strategy_loop(self) -> None:
@@ -500,6 +562,9 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        repair = self._residual_repair_plan()
+        if repair is not None:
+            return repair
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):

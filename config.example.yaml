@@ -110,6 +110,12 @@ execution:
   # latency.  Keep 0 until enough live fills establish a suitable value.
   # 可选的第一腿延迟保护；积累足够实盘成交数据前请保持 0。
   second_leg_latency_reserve_bps: 0.0
+  # One explicit repair attempt per bot start for a tiny one-leg residual that
+  # is below the venue's minimum order size. It opens a minimum paired slice
+  # and folds the residual into its hedge leg; it may lose to spread/fees.
+  # 每次启动最多一次；仅用于低于交易所最小下单额的单腿残差。会开最小配对
+  # 仓位并将残差并入对冲腿，可能损失点差/手续费。默认 false，确认残差后才开启。
+  residual_repair_once: false
   hedge_slippage_bps: 20.0     # price protection on delta hedges / 对冲滑点保护
   net_tolerance_base: 0.001    # max tolerated net delta (base units) / 允许的净敞口
   max_consecutive_errors: 3    # halt after N straight failures / 连续失败 N 次后停机

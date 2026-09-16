@@ -152,6 +152,7 @@ class Config:
     hedge_leg_slippage_bps: float
     slippage_reserve_bps: float
     second_leg_latency_reserve_bps: float
+    residual_repair_once: bool
     hedge_slippage_bps: float
     net_tolerance_base: float
     max_consecutive_errors: int
@@ -239,6 +240,7 @@ _SCHEMA: Dict[str, Any] = {
         "hedge_leg_slippage_bps": float,
         "slippage_reserve_bps": float,
         "second_leg_latency_reserve_bps": float,
+        "residual_repair_once": bool,
         "hedge_slippage_bps": float,
         "net_tolerance_base": float,
         "max_consecutive_errors": int,
@@ -494,6 +496,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         slippage_reserve_bps=float(_get(
             raw, "execution", "slippage_reserve_bps", 2.0)),
         second_leg_latency_reserve_bps=second_leg_latency_reserve_bps,
+        residual_repair_once=bool(_get(
+            raw, "execution", "residual_repair_once", False)),
         hedge_slippage_bps=float(_get(raw, "execution", "hedge_slippage_bps", 20.0)),
         net_tolerance_base=float(_get(raw, "execution", "net_tolerance_base", 0.001)),
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),

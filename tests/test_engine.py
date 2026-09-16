@@ -183,6 +183,31 @@ def test_next_eligible_pair_merges_subminimum_residual():
     asyncio.run(go())
 
 
+def test_explicit_residual_repair_runs_once_without_an_arb_edge():
+    async def go():
+        eng = make_engine(midline=0.0, upper=10.0, lower=10.0)
+        eng.cfg.max_order_notional = 22.0
+        eng.cfg.residual_repair_once = True
+        eng.cfg.entropy_retry_once = False
+        eng.entropy.set_book(100.00, 100.10)
+        eng.hedge.set_book(100.00, 100.10)
+        eng.hedge.position = -0.041  # $4.10: below the $10 venue minimum
+
+        # No market edge exists, but the explicitly enabled repair returns a
+        # minimum sell-Entropy / buy-hedge pair and then latches for this run.
+        buy, sell, plan = eng._scan(time.time())
+        assert buy is eng.hedge and sell is eng.entropy
+        assert plan.buy_notional >= eng._min_notional
+        assert eng._scan(time.time()) is None
+
+        await eng._execute(buy, sell, plan)
+        approx(eng.entropy.position, -plan.qty)
+        approx(eng.hedge.position, plan.qty)
+        assert eng.trades == 1
+
+    asyncio.run(go())
+
+
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5
