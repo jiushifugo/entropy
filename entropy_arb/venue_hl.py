@@ -608,7 +608,26 @@ class HLVenue:
         filled = float((last_seen or {}).get("filled_base") or 0.0)
         return with_source({"status": "cancel-timeout", "filled_base": filled,
                             "avg_px": None, "err": cancel_err,
-                            "unresolved": True})
+                            "unresolved": True, "pending_oid": oid})
+
+    async def resolve_managed_order(self, oid: int) -> Optional[dict]:
+        """Re-check a managed-limit cancellation whose final state was unknown.
+
+        Returns a final non-open order status once confirmed.  If the order is
+        still open, asks for cancellation again and leaves it pending; callers
+        must keep strategy admission paused until this returns a final state.
+        """
+        status = await self._order_status(oid)
+        if status is not None and status.get("status") != "open":
+            return status
+        if status is not None:
+            log.warning("[%s] pending managed order oid=%s remains open; "
+                        "retrying cancel", self.name, oid)
+            await self._cancel_by_oid(oid)
+        status = await self._order_status(oid)
+        if status is not None and status.get("status") != "open":
+            return status
+        return None
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:

@@ -97,6 +97,11 @@ class Engine:
         self.risk_limited = False
         self._risk_halted = False
         self._residual_repair_attempted = False
+        # A managed Entropy limit whose cancellation was requested but not
+        # authoritatively confirmed.  Keep all new strategy orders paused
+        # until its final state is known; position reconciliation then handles
+        # any late fill before trading resumes.
+        self._pending_entropy_oid: Optional[int] = None
 
     # ------------------------------------------------------------- utilities
 
@@ -530,6 +535,8 @@ class Engine:
     async def _evaluate(self) -> None:
         cfg = self.cfg
         if self.halted:
+            return
+        if self._pending_entropy_oid is not None:
             return
         now = time.time()
         if now - self.last_trade_ts < cfg.cooldown_sec:
@@ -1054,6 +1061,16 @@ class Engine:
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
+        entropy_info = binfo if buy.key == "entropy" else sinfo
+        pending_cancel = (
+            entropy_info.get("status") == "cancel-timeout"
+            and entropy_info.get("pending_oid") is not None
+        )
+        if pending_cancel:
+            self._pending_entropy_oid = int(entropy_info["pending_oid"])
+            log.warning("[ENTROPY PENDING] cancel confirmation timed out for "
+                        "oid=%s — new entries paused until final state is "
+                        "confirmed", self._pending_entropy_oid)
         hard_err = (binfo.get("err") is not None
                     or sinfo.get("err") is not None)
         rate_limited = False
@@ -1080,7 +1097,12 @@ class Engine:
             log.error("[ASYMMETRIC FILL] buy %.6g / sell %.6g — "
                       "counting as execution failure", bfill, sfill)
         completed_trade = sent_ok and matched > cfg.net_tolerance_base
-        if sent_ok:
+        if pending_cancel:
+            # This is an uncertainty gate rather than a proven execution
+            # failure.  Reconciliation retains the pause and will only clear
+            # it after the exact order reaches a final state.
+            pass
+        elif sent_ok:
             self.consec_errors = 0
         elif not rate_limited:
             self.consec_errors += 1
@@ -1210,8 +1232,30 @@ class Engine:
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
+        await self._resolve_pending_entropy_order()
         if hedge:
             await self._maybe_hedge()
+
+    async def _resolve_pending_entropy_order(self) -> None:
+        """Keep unknown managed limits from becoming silent live orders."""
+        oid = self._pending_entropy_oid
+        if oid is None or not hasattr(self.entropy, "resolve_managed_order"):
+            return
+        async with self._vlock(self.entropy.key):
+            # It may have been cleared while awaiting the venue lock.
+            if self._pending_entropy_oid != oid:
+                return
+            status = await self.entropy.resolve_managed_order(oid)
+        if status is None:
+            self._skiplog("[ENTROPY PENDING] oid=%s still not final; strategy "
+                          "remains paused", oid)
+            return
+        self._pending_entropy_oid = None
+        self.consec_errors = 0
+        log.warning("[ENTROPY PENDING] oid=%s resolved as %s — strategy "
+                    "may resume after position reconciliation", oid,
+                    status.get("status", "unknown"))
+        self._update_evt.set()
 
     async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):

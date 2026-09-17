@@ -224,6 +224,34 @@ def test_residual_repair_handles_base_minimum_dust_above_quote_minimum():
     assert plan.buy_notional >= eng._min_notional
 
 
+def test_pending_entropy_cancel_pauses_until_final_status():
+    async def go():
+        eng = make_engine()
+        eng._pending_entropy_oid = 123
+        calls = []
+
+        async def resolve(oid):
+            calls.append(oid)
+            return None
+
+        eng.entropy.resolve_managed_order = resolve
+        await eng._resolve_pending_entropy_order()
+        assert calls == [123]
+        assert eng._pending_entropy_oid == 123
+
+        async def resolved(oid):
+            calls.append(oid)
+            return {"status": "canceled", "filled_base": 0.0}
+
+        eng.entropy.resolve_managed_order = resolved
+        eng.consec_errors = 2
+        await eng._resolve_pending_entropy_order()
+        assert eng._pending_entropy_oid is None
+        assert eng.consec_errors == 0
+
+    asyncio.run(go())
+
+
 def test_inventory_ladder():
     eng = make_engine()
     eng.cfg.inventory_scale_bps, eng.cfg.inventory_floor_frac = 10.0, 0.5
