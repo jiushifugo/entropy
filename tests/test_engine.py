@@ -275,6 +275,21 @@ def test_residual_repair_handles_base_minimum_dust_above_quote_minimum():
     assert plan.buy_notional >= eng._min_notional
 
 
+def test_residual_repair_handles_dust_beside_paired_inventory():
+    eng = make_engine(midline=0.0, upper=10.0, lower=10.0)
+    eng.cfg.residual_repair_once = True
+    eng.entropy.set_book(100.00, 100.10)
+    eng.hedge.set_book(100.00, 100.10)
+    # A matched -0.0201 / +0.0201 pair plus an Entropy-only -0.0047 dust.
+    # Both venue positions are non-zero, but the net dust is not independently
+    # tradable and must still get the explicit one-time repair.
+    eng.entropy.position, eng.hedge.position = -0.0248, 0.0201
+
+    buy, sell, plan = eng._scan(time.time())
+    assert buy is eng.hedge and sell is eng.entropy
+    assert plan is not None
+
+
 def test_pending_entropy_cancel_pauses_until_final_status():
     async def go():
         eng = make_engine()

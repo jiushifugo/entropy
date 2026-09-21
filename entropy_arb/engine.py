@@ -441,8 +441,10 @@ class Engine:
         net = epos + hpos
         if abs(net) <= cfg.net_tolerance_base:
             return None
-        # Only repair a genuine one-leg, venue-untradeable residual.  Larger
-        # or paired exposures must retain normal strategy/risk handling.
+        # Repair only a venue-untradeable net residual.  It can sit beside a
+        # fully paired inventory (for example, -0.0248 Entropy / +0.0201
+        # Arcus leaves -0.0047 unpaired); refusing solely because both venue
+        # positions are non-zero strands that dust forever.
         ref = self.entropy.book.mid() or self.hedge.book.mid()
         # Test the residual against the minimum of the venue that actually
         # holds it.  Using the lower minimum across both venues can wrongly
@@ -458,9 +460,7 @@ class Engine:
             abs(net) + 1e-12 >= residual_venue.min_base
             and abs(net) * ref >= residual_venue.min_quote
         ) if ref is not None else False
-        if (ref is None or independently_closeable
-                or (abs(epos) > cfg.net_tolerance_base
-                    and abs(hpos) > cfg.net_tolerance_base)):
+        if ref is None or independently_closeable:
             return None
         if not (self.entropy.ready_to_trade() and self.hedge.ready_to_trade()
                 and self.entropy.book.is_fresh(cfg.staleness_sec)
