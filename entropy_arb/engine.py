@@ -1102,6 +1102,17 @@ class Engine:
             # failure.  Reconciliation retains the pause and will only clear
             # it after the exact order reaches a final state.
             pass
+        elif (asymmetric_fill
+              and ((buy.key == "hedge" and binfo.get("status") == "rejected")
+                   or (sell.key == "hedge" and sinfo.get("status") == "rejected"))):
+            # Entropy has already filled but the mandatory cross-venue hedge
+            # was rejected.  _execute_locked() will still run the emergency
+            # delta hedge after this method returns; stop admitting new pairs
+            # now rather than retrying the same failing Arcus order twice more.
+            self.halted = True
+            log.critical("HALTED after Arcus hedge rejection with an Entropy "
+                         "fill — emergency hedge follows; inspect the Arcus "
+                         "rejection reason before restarting")
         elif sent_ok:
             self.consec_errors = 0
         elif not rate_limited:

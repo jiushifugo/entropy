@@ -147,6 +147,30 @@ def test_emergency_hedge_uses_venue_minimum_not_strategy_minimum():
     asyncio.run(go())
 
 
+def test_arcus_rejected_after_entropy_fill_halts_immediately():
+    async def go():
+        eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+        eng.cfg.max_consecutive_errors = 3
+        e, h = eng.entropy, eng.hedge
+        e.set_book(100.0, 100.1)
+        h.set_book(100.2, 100.3)
+        plan, reason = eng._plan(e, h, 22.0)
+        assert plan is not None, reason
+
+        async def rejected_arcus(**kwargs):
+            return {"status": "rejected", "filled_base": 0.0,
+                    "avg_px": None, "err": "Arcus rejected: reason=band",
+                    "unresolved": False}
+
+        h.send_taker = rejected_arcus
+        await eng._execute(e, h, plan)
+        assert eng.halted is True
+        assert e.position > 0
+        assert h.position == 0
+
+    asyncio.run(go())
+
+
 def test_next_eligible_pair_merges_subminimum_residual():
     async def go():
         eng = make_engine(midline=0.0, upper=1.0, lower=1.0)

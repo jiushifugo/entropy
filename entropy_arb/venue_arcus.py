@@ -31,6 +31,22 @@ FINAL_STATES = {"FILLED", "CANCELED", "CANCELLED", "MARGIN_CANCELED",
                 "REJECTED", "EXPIRED", "PARTIALLY_FILLED"}
 
 
+def _rejection_reason(row: dict) -> str:
+    """Keep the exchange explanation attached to a final rejected order.
+
+    Arcus sends the final order state over its account websocket.  The REST
+    request can succeed even though the matching engine subsequently rejects
+    the order, so discarding these fields makes a live one-leg fill impossible
+    to diagnose.
+    """
+    for key in ("rejectReason", "rejectionReason", "reason", "message",
+                "error", "errorMessage", "statusMessage"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return f"Arcus rejected: {key}={str(value)[:240]}"
+    return "Arcus rejected (no exchange reason supplied)"
+
+
 def _decimal_places(value: str) -> int:
     return max(-Decimal(str(value)).as_tuple().exponent, 0)
 
@@ -208,6 +224,8 @@ class ArcusOrdersFeed:
                 "avg_px": (float(row["avgFillPrice"])
                            if row.get("avgFillPrice") else None),
             }
+            if state == "REJECTED":
+                info["err"] = _rejection_reason(row)
             fut = self._pending.pop(key, None)
             if fut is not None and not fut.done():
                 fut.set_result(info)
@@ -447,7 +465,7 @@ class ArcusVenue:
                     "avg_px": None, "err": None, "unresolved": True}
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
-            return {**info, "err": None, "unresolved": False}
+            return {**info, "err": info.get("err"), "unresolved": False}
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(client_id)
             return {"status": "timeout", "filled_base": 0.0,
