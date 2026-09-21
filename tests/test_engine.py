@@ -171,6 +171,33 @@ def test_arcus_rejected_after_entropy_fill_halts_immediately():
     asyncio.run(go())
 
 
+def test_existing_dust_does_not_turn_canceled_attempt_into_failure():
+    async def go():
+        eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
+        eng.cfg.entropy_retry_once = False
+        e, h = eng.entropy, eng.hedge
+        e.set_book(100.0, 100.1)
+        h.set_book(100.3, 100.4)
+        # Existing long hedge dust is below its base-size minimum.  A later
+        # pair that receives no fills must not count this old residual again.
+        e.position, h.position = -0.0122, 0.0201
+        plan, reason = eng._plan(e, h, 22.0)
+        assert plan is not None, reason
+
+        async def canceled(**kwargs):
+            return {"status": "canceled", "filled_base": 0.0,
+                    "avg_px": None, "err": None, "unresolved": False}
+
+        e.send_taker = canceled
+        h.send_taker = canceled
+        await eng._execute(e, h, plan)
+        assert eng.halted is False
+        assert eng.consec_errors == 0
+        approx(e.position + h.position, 0.0079)
+
+    asyncio.run(go())
+
+
 def test_next_eligible_pair_merges_subminimum_residual():
     async def go():
         eng = make_engine(midline=0.0, upper=1.0, lower=1.0)

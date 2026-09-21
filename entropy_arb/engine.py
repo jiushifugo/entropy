@@ -786,6 +786,10 @@ class Engine:
         if self.halted:
             return False
         cfg = self.cfg
+        # A pre-existing dust residual can be below a venue's minimum order
+        # size.  It must not turn a later, completely canceled pair attempt
+        # into a fresh asymmetric-fill failure.
+        prior_net = sum(v.position for v in self.venues.values())
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
@@ -1088,14 +1092,22 @@ class Engine:
         # _execute_locked() still calls _maybe_hedge() after this method, so
         # the exposure is reduced before a configured halt takes effect.
         # Leg fills can intentionally differ when a sub-minimum residual is
-        # merged into this pair.  What matters is the account's resulting
-        # net delta, not equality of this pair's two raw fill quantities.
+        # merged into this pair.  Compare account net *change* rather than
+        # absolute net: an old dust residual must not be charged again for a
+        # completely canceled later attempt.
         post_net = sum(v.position for v in self.venues.values())
-        asymmetric_fill = abs(post_net) > cfg.net_tolerance_base
+        execution_net_change = post_net - prior_net
+        # A pair that folds old dust into its hedge leg changes net by the
+        # dust amount while *reducing* absolute exposure to zero.  It is safe;
+        # only count execution outcomes that increase absolute net exposure.
+        asymmetric_fill = (
+            abs(post_net) > abs(prior_net) + cfg.net_tolerance_base
+        )
         sent_ok = not hard_err and not unresolved and not asymmetric_fill
         if asymmetric_fill:
-            log.error("[ASYMMETRIC FILL] buy %.6g / sell %.6g — "
-                      "counting as execution failure", bfill, sfill)
+            log.error("[ASYMMETRIC FILL] buy %.6g / sell %.6g | net change "
+                      "%+.6g — counting as execution failure", bfill, sfill,
+                      execution_net_change)
         completed_trade = sent_ok and matched > cfg.net_tolerance_base
         if pending_cancel:
             # This is an uncertainty gate rather than a proven execution
