@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from entropy_arb.book import OrderBook
 from entropy_arb.venue_arcus import (  # noqa: E402
-    ArcusOrdersFeed, _decimal_string, _levels, _load_private_key,
+    ArcusOrdersFeed, ArcusVenue, _decimal_string, _levels, _load_private_key,
     _public_key_hex, _to_units,
 )
 
@@ -80,3 +80,18 @@ def test_order_feed_subscription_uses_documented_shape():
         "id": "0x" + "a" * 40,
         "nRecentClosed": 100,
     }
+
+
+def test_missing_account_response_is_not_reported_as_zero_equity():
+    async def go():
+        venue = object.__new__(ArcusVenue)
+        venue.name = "ARCUS"
+        venue._account_params = lambda: {}
+
+        async def missing_account(*_args, **_kwargs):
+            return None
+
+        venue._get = missing_account
+        assert await venue.fetch_equity() is None
+
+    asyncio.run(go())

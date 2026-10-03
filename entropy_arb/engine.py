@@ -95,6 +95,11 @@ class Engine:
         self.daily_volume_usd = 0.0
         self.profit_only = False
         self.risk_limited = False
+        # A single malformed account-value response must not be able to lock
+        # the strategy for the rest of the UTC day.  Only equity refreshes
+        # advance this counter; fill-volume updates must not double-count the
+        # same sample.
+        self._daily_loss_sample_streak = 0
         self._risk_halted = False
         self._residual_repair_attempted = False
         # A managed Entropy limit whose cancellation was requested but not
@@ -1369,16 +1374,24 @@ class Engine:
                        "profit_only": self.profit_only}, fh)
         os.replace(tmp, path)
 
-    def _apply_risk_gate(self) -> None:
+    def _apply_risk_gate(self, *, confirm_loss_sample: bool = False) -> None:
         loss_hit = (self.cfg.daily_loss_limit_usd > 0
                     and self.daily_pnl_usd is not None
                     and self.daily_pnl_usd <= -self.cfg.daily_loss_limit_usd)
         volume_hit = (self.cfg.daily_volume_limit_usd > 0
                       and self.daily_volume_usd
                       >= self.cfg.daily_volume_limit_usd)
-        profit_only_hit = (loss_hit
+        if confirm_loss_sample:
+            self._daily_loss_sample_streak = (
+                self._daily_loss_sample_streak + 1 if loss_hit else 0)
+        confirmed_loss_hit = loss_hit and self._daily_loss_sample_streak >= 2
+        if (loss_hit and confirm_loss_sample
+                and self._daily_loss_sample_streak == 1):
+            log.warning("[DAILY RISK] loss threshold seen once; awaiting a "
+                        "second complete equity snapshot before locking")
+        profit_only_hit = (confirmed_loss_hit
                            and self.cfg.daily_loss_action == "profit_only")
-        hard_hit = volume_hit or (loss_hit and not profit_only_hit)
+        hard_hit = volume_hit or (confirmed_loss_hit and not profit_only_hit)
         if profit_only_hit and not self.profit_only:
             self.profit_only = True
             self._save_daily_risk()
@@ -1451,6 +1464,7 @@ class Engine:
             self.daily_pnl_usd = 0.0 if valid else None
             self.profit_only = False
             self.risk_limited = False
+            self._daily_loss_sample_streak = 0
             if self._risk_halted:
                 self.halted = False
                 self._risk_halted = False
@@ -1459,7 +1473,7 @@ class Engine:
         if valid and self.daily_equity_baseline is not None:
             self.daily_pnl_usd = total - self.daily_equity_baseline
             self._save_daily_risk()
-        self._apply_risk_gate()
+        self._apply_risk_gate(confirm_loss_sample=valid)
 
     async def _http_keepalive_loop(self) -> None:
         if self.cfg.http_keepalive_sec <= 0:

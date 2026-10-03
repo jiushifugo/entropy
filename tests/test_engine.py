@@ -419,6 +419,18 @@ def test_entropy_resting_dust_flip_keeps_absolute_net_floor():
         entropy_limit=100.0)
 
 
+def test_daily_loss_requires_two_complete_equity_samples():
+    eng = make_engine()
+    eng.cfg.daily_loss_limit_usd = 10.0
+    eng.daily_pnl_usd = -11.0
+
+    eng._apply_risk_gate(confirm_loss_sample=True)
+    assert not eng.risk_limited
+
+    eng._apply_risk_gate(confirm_loss_sample=True)
+    assert eng.risk_limited
+
+
 def run_scan(eng):
     async def go():
         # first pass arms the direction, second passes the persistence gate

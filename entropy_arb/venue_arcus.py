@@ -478,7 +478,13 @@ class ArcusVenue:
     async def fetch_equity(self):
         data = await self._get("/v1/account", self._account_params(), auth=True)
         if data is None:
-            return 0.0, 0.0
+            # A missing account response is not a zero-balance account.  In
+            # particular, a transient 404 during a venue/API recovery used to
+            # be treated as $0 equity and could manufacture a huge daily loss.
+            # Let the engine discard this incomplete account snapshot instead.
+            log.warning("[%s] account equity unavailable; ignoring snapshot",
+                        self.name)
+            return None
         equity = float(data.get("equity"))
         free = float(data.get("freeCollateral",
                               data.get("availableBalance",
