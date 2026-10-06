@@ -265,3 +265,8 @@ nothing here is investment advice. Start with tiny position caps.
 ## License
 
 [MIT](LICENSE)
+## Hourly volume diagnostics
+
+Live mode samples each direction once per second and reports the first blocking gate: insufficient edge, inventory caps/surcharge, venue/feed pause, risk pause, cooldown/waiting, or depth/minimum size. Percentages use blocked samples, not orders; eligible samples are shown separately. Execution outcomes (full, partial, zero-fill, error/unresolved) use a separate denominator. Internal retries count once; emergency delta hedges are excluded. These diagnostics do not change trading decisions.
+
+The dashboard shows the current UTC hour. Completed hours and a partial shutdown summary are logged under `[VOLUME STATS]`. Counters restart with the process and do not reset risk state or reconstruct historical hours.

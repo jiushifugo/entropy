@@ -194,7 +194,35 @@ class Dashboard:
         else:
             mid = Group(self._venues_panel(), self._session_panel())
         return Group(self._header(), mid, self._signal_panel(),
-                     self._trades_panel(), self._events_panel())
+                     self._volume_panel(), self._trades_panel(), self._events_panel())
+
+    def _volume_panel(self):
+        stats = self.eng.volume_stats
+        # Use the same translation selector as the rest of the dashboard.
+        zh = self._t("session") == "会话"
+        if self.eng.record_only:
+            return Panel("仅采集：未启用交易统计" if zh else "Record-only: trading diagnostics disabled", box=box.ROUNDED)
+        labels = {"no_edge": "价差不足", "inventory": "库存限制",
+                  "venue": "接口/行情暂停", "risk": "风控暂停",
+                  "waiting": "冷却/等待", "depth": "深度/最小单量"}
+        blocked = sum(n for k, n in stats.samples.items() if k != "eligible")
+        table = Table.grid(expand=True)
+        table.add_column()
+        table.add_column()
+        keys = list(labels)
+        cells = []
+        for key in keys:
+            n = stats.samples[key]
+            percent = n / blocked * 100 if blocked else 0
+            cells.append(f'{labels[key] if zh else key}: {n} ({percent:.1f}%)')
+        for i in range(0, len(cells), 2):
+            table.add_row(cells[i], cells[i + 1])
+        execution_total = sum(stats.executions.values())
+        outcomes = {"full": "完整成交", "partial": "部分成交", "no_fill": "零成交", "error": "异常/未确认"}
+        execution = " | ".join(f'{label if zh else key} {stats.executions[key]} ({stats.executions[key] / execution_total * 100 if execution_total else 0:.0f}%)' for key, label in outcomes.items())
+        footer = Text((f'阻塞采样 {blocked} · 可执行 {stats.samples["eligible"]}\n' if zh else f'Blocked {blocked} · eligible {stats.samples["eligible"]}\n') + execution, style="dim")
+        title = "当前小时未成交原因 · 每秒/方向 · UTC" if zh else "Current UTC hour · blockers sampled 1/sec/direction"
+        return Panel(Group(table, footer), title=title, box=box.ROUNDED)
 
     def _header(self):
         eng, cfg = self.eng, self.eng.cfg

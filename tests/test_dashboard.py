@@ -58,6 +58,20 @@ def render(eng, lang="en") -> str:
     return console.export_text()
 
 
+def test_volume_panel_chinese_and_narrow():
+    eng = make_engine()
+    eng.volume_stats.samples.update(no_edge=3, inventory=1)
+    eng.volume_stats.executions.update(full=1, no_fill=1)
+    dash = Dashboard(eng, BufferLogHandler(), "logs/engine.log", lang="zh")
+    console = Console(record=True, width=65, force_terminal=False)
+    dash.console = console
+    console.print(dash._volume_panel())
+    output = console.export_text()
+    assert "价差不足: 3 (75.0%)" in output
+    assert "库存限制: 1 (25.0%)" in output
+    assert "零成交 1 (50%)" in output
+
+
 def make_engine():
     eng = Engine(make_cfg())
     eng.entropy = StubVenue("entropy", "ENTROPY")

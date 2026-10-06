@@ -30,6 +30,7 @@ import aiohttp
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
+from .volume_stats import VolumeStats
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
@@ -107,6 +108,7 @@ class Engine:
         # until its final state is known; position reconciliation then handles
         # any late fill before trading resumes.
         self._pending_entropy_oid: Optional[int] = None
+        self.volume_stats = VolumeStats()
 
     # ------------------------------------------------------------- utilities
 
@@ -228,6 +230,7 @@ class Engine:
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
+            tasks.append(asyncio.create_task(self._volume_stats_loop(), name="volume-stats"))
             tasks.append(asyncio.create_task(self._strategy_loop(),
                                              name="strategy"))
             tasks.append(asyncio.create_task(self._balance_loop(),
@@ -248,6 +251,8 @@ class Engine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if not self.record_only:
+            log.info("[VOLUME STATS] partial %s", self.volume_stats.summary())
         for v in self.venues.values():
             await v.close()
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
@@ -418,10 +423,10 @@ class Engine:
         hs = sell.cap_usd + sell.position * ref_px
         return min(hb, hs)
 
-    def _plan(self, buy, sell, cap_notional: float):
+    def _plan(self, buy, sell, cap_notional: float, threshold_override=None):
         return plan_arb(
             buy.book, sell.book,
-            threshold_bps=self._eff_threshold(buy, sell),
+            threshold_bps=(self._eff_threshold(buy, sell) if threshold_override is None else threshold_override),
             buy_fee_bps=buy.fee_bps, sell_fee_bps=sell.fee_bps,
             take_fraction=self.cfg.take_fraction,
             cap_notional=cap_notional,
@@ -562,6 +567,69 @@ class Engine:
         t.add_done_callback(self._exec_tasks.discard)
         await asyncio.shield(t)
 
+    def _volume_reason(self, now, buy, sell, dkey):
+        """Read-only first blocking gate, sampled independently of book updates."""
+        cfg = self.cfg
+        if self.halted:
+            return "risk"
+        if self.risk_limited and all(abs(v.position) <= cfg.net_tolerance_base for v in (buy, sell)):
+            return "risk"
+        if self._pending_entropy_oid is not None:
+            return "venue"
+        if self._venue_down or not all(v.book.is_fresh(cfg.staleness_sec) and v.ready_to_trade() for v in (buy, sell)):
+            return "venue"
+        if any(now < self._venue_limited_until.get(v.key, 0) or sum(now - t <= 60 for t in self._sends.get(v.key, ())) >= v.orders_per_min for v in (buy, sell)):
+            return "venue"
+        if now - self.last_trade_ts < cfg.cooldown_sec or any(self._venue_locks.get(v.key) is not None and self._venue_locks[v.key].locked() for v in (buy, sell)):
+            return "waiting"
+        if any(v.book.last_update_ts <= v.last_traded_ts for v in (buy, sell)):
+            return "waiting"
+        ref = buy.book.best_ask() or 0.0
+        cap = self._state_cap_notional(dkey, ref)
+        if cap < self._min_notional:
+            return "risk" if self.risk_limited else "inventory"
+        cap = min(cfg.max_order_notional, cap)
+        plan, reason = self._plan(buy, sell, cap)
+        if reason in ("no_edge", "empty_book"):
+            surcharge = self._inv_add_bps(buy, sell)
+            if surcharge > 0 and self._plan(buy, sell, cap, self._eff_threshold(buy, sell) - surcharge)[0] is not None:
+                return "inventory"
+            return "no_edge"
+        if plan is None:
+            return "depth"
+        net = self._budgeted_net_bps(buy, sell, plan)
+        if self.profit_only and net + 1e-9 < cfg.profit_only_min_bps:
+            return "risk"
+        if self._is_dust_flip(dkey, ref) and net + 1e-9 < cfg.dust_flip_min_net_bps:
+            return "no_edge"
+        headroom = self._headroom(buy, sell, plan.buy_limit)
+        if headroom < plan.buy_notional:
+            plan, _ = self._plan(buy, sell, min(cap, headroom))
+            if plan is None:
+                return "inventory"
+            net = self._budgeted_net_bps(buy, sell, plan)
+            if self.profit_only and net + 1e-9 < cfg.profit_only_min_bps:
+                return "risk"
+            if self._is_dust_flip(dkey, ref) and net + 1e-9 < cfg.dust_flip_min_net_bps:
+                return "no_edge"
+        armed = self._armed.get(dkey)
+        if armed is None or now - armed < cfg.premium_persist_sec:
+            return "waiting"
+        return "eligible"
+
+    def _rotate_volume_stats(self, now):
+        previous = self.volume_stats.rotate(now)
+        if previous is not None:
+            log.info("[VOLUME STATS] %s", previous)
+
+    async def _volume_stats_loop(self):
+        while not self.stop.is_set():
+            now = time.time()
+            self._rotate_volume_stats(now)
+            for buy, sell, key in ((self.hedge, self.entropy, "sell_entropy"), (self.entropy, self.hedge, "buy_entropy")):
+                self.volume_stats.samples[self._volume_reason(now, buy, sell, key)] += 1
+            await asyncio.sleep(1)
+
     async def _execute_locked(self, buy, sell, plan: ArbPlan) -> None:
         """Run one execution while holding both venue locks (acquired by the
         caller), then release them and settle the aftermath: unresolved
@@ -573,6 +641,8 @@ class Engine:
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._rotate_volume_stats(time.time())
+            self.volume_stats.executions["error"] += 1
             log.exception("execute failed")
         finally:
             self._vlock(buy.key).release()
@@ -1149,8 +1219,11 @@ class Engine:
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}",
                            completed_trade)
+        self._rotate_volume_stats(time.time())
         self._log_csv(direction, buy, sell, plan, completed_trade, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
+        self.volume_stats.record_execution(matched, plan.qty, cfg.net_tolerance_base,
+                                           hard_err or unresolved or asymmetric_fill)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 
