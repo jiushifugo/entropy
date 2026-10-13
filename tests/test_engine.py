@@ -109,6 +109,25 @@ def test_second_leg_latency_reserve_raises_both_hurdles():
     approx(eng._eff_threshold(buy=e, sell=h), 3.0)
 
 
+def test_entropy_resting_reason_categories():
+    eng = make_engine(midline=0, upper=2, lower=2)
+    e, h = eng.entropy, eng.hedge
+    e.set_book(100, 100.01)
+    h.set_book(100, 100.01)
+    def reason():
+        return eng._entropy_resting_block_reason(
+            entropy_is_buy=True, entropy=e, hedge=h, entropy_limit=100)
+    assert reason() == 'insufficient-edge'
+    h.book.alive_ts = 0
+    assert reason() == 'stale-book'
+    eng._venue_down['hedge'] = True
+    assert reason() == 'venue-down'
+    eng.halted = True
+    assert reason() == 'risk'
+    eng.stop.set()
+    assert reason() == 'shutdown'
+
+
 def test_entropy_resting_edge_guard_tracks_hedge_book():
     eng = make_engine(midline=0.0, upper=2.0, lower=2.0)
     eng.cfg.hedge_leg_slippage_bps = 0.0

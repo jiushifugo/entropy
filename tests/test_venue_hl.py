@@ -74,6 +74,12 @@ def test_managed_limit_cancels_then_reports_partial_fill():
         assert result["filled_base"] == 0.004
         assert not result["unresolved"]
         assert result["confirm_source"] == "rest"
+        diag = result["diagnostics"]
+        assert diag["cancel_reason"] == "partial-fill"
+        assert diag["submit_ms"] >= 0
+        assert diag["resting_ms"] >= 0
+        assert diag["cancel_confirm_ms"] >= 0
+        assert diag["total_ms"] >= diag["submit_ms"]
 
     asyncio.run(go())
 

@@ -814,6 +814,12 @@ class Engine:
 
     def _entropy_resting_edge_ok(self, *, entropy_is_buy: bool, entropy,
                                  hedge, entropy_limit: float) -> bool:
+        return self._entropy_resting_block_reason(
+            entropy_is_buy=entropy_is_buy, entropy=entropy, hedge=hedge,
+            entropy_limit=entropy_limit) is None
+
+    def _entropy_resting_block_reason(self, *, entropy_is_buy: bool, entropy,
+                                      hedge, entropy_limit: float):
         """Whether a resting Entropy fill is still safe to hedge now.
 
         The Entropy price is fixed by the live order.  Revalue only the RH leg
@@ -823,12 +829,14 @@ class Engine:
         floor.  Stale/down books and a hard risk limit cancel immediately.
         """
         cfg = self.cfg
-        if (self.halted or self.stop.is_set() or self.risk_limited
-                or entropy.key in self._venue_down
-                or hedge.key in self._venue_down
-                or not entropy.book.is_fresh(cfg.staleness_sec)
-                or not hedge.book.is_fresh(cfg.staleness_sec)):
-            return False
+        if self.stop.is_set():
+            return "shutdown"
+        if self.halted or self.risk_limited:
+            return "risk"
+        if entropy.key in self._venue_down or hedge.key in self._venue_down:
+            return "venue-down"
+        if not entropy.book.is_fresh(cfg.staleness_sec) or not hedge.book.is_fresh(cfg.staleness_sec):
+            return "stale-book"
         hedge_slip = max(cfg.hedge_leg_slippage_bps, 0.0) / 1e4
         if entropy_is_buy:
             buy, sell = entropy, hedge
@@ -841,7 +849,7 @@ class Engine:
             buy_px = top * (1.0 + hedge_slip) if top is not None else None
             sell_px = entropy_limit
         if buy_px is None or sell_px is None or buy_px <= 0 or sell_px <= 0:
-            return False
+            return "empty-book"
         net_bps = (
             sell_px * (1.0 - sell.fee_bps / 1e4)
             / (buy_px * (1.0 + buy.fee_bps / 1e4)) - 1.0
@@ -852,7 +860,7 @@ class Engine:
             floor_bps = max(floor_bps, cfg.dust_flip_min_net_bps)
         if self.profit_only:
             floor_bps = max(floor_bps, cfg.profit_only_min_bps)
-        return net_bps + 1e-9 >= floor_bps
+        return None if net_bps + 1e-9 >= floor_bps else "insufficient-edge"
 
     async def _execute(self, buy, sell, plan: ArbPlan) -> bool:
         """Send both legs and settle the fills. Both venue locks are held by
@@ -908,6 +916,14 @@ class Engine:
         )
         entropy_started = time.perf_counter()
         if managed_entropy:
+            top = entropy.book.best_ask() if entropy_is_buy else entropy.book.best_bid()
+            distance = ((entropy_bound / top - 1) * 1e4 if entropy_is_buy else
+                        (1 - entropy_bound / top) * 1e4) if top else None
+            log.info("[ENTROPY QUOTE] %s: limit %.8g | executable top %s | "
+                     "crossing allowance %s bps | book age %.0fms", direction,
+                     entropy_bound, top,
+                     f"{distance:+.3f}" if distance is not None else "unknown",
+                     (time.time() - entropy.book.last_update_ts) * 1000)
             self._record_send(entropy)
             try:
                 entropy_info = await entropy.send_managed_limit(
@@ -915,6 +931,9 @@ class Engine:
                     limit_px=entropy_bound,
                     ttl_sec=cfg.entropy_resting_ttl_sec,
                     keep_open=lambda: self._entropy_resting_edge_ok(
+                        entropy_is_buy=entropy_is_buy, entropy=entropy,
+                        hedge=hedge, entropy_limit=entropy_bound),
+                    cancel_diagnostic=lambda: self._entropy_resting_block_reason(
                         entropy_is_buy=entropy_is_buy, entropy=entropy,
                         hedge=hedge, entropy_limit=entropy_bound),
                 )

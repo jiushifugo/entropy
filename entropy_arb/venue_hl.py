@@ -513,7 +513,7 @@ class HLVenue:
     async def send_managed_limit(
             self, *, is_buy: bool, qty: float, limit_px: float,
             ttl_sec: float, keep_open: Callable[[], bool],
-            reduce_only: bool = False) -> dict:
+            reduce_only: bool = False, cancel_diagnostic=None) -> dict:
         """Place a short-lived GTC limit and always resolve/cancel it.
 
         The caller supplies ``keep_open`` so the engine can continuously
@@ -523,6 +523,13 @@ class HLVenue:
         """
         assert self.account is not None and self.asset_id >= 0
         started_ms = int(time.time() * 1000)
+        started = time.monotonic()
+        submitted = None
+        resting = None
+        cancel_started = None
+        cancel_reason = None
+        cancel_detail = None
+        oid = None
         order_req = {"coin": self.coin, "is_buy": is_buy,
                      "sz": round(qty, 8), "limit_px": limit_px,
                      "order_type": {"limit": {"tif": "Gtc"}},
@@ -538,9 +545,21 @@ class HLVenue:
                     "unresolved": False}
 
         body, err, unresolved, post_source = await self._post_action(payload)
+        submitted = time.monotonic()
 
         def with_source(info: dict) -> dict:
             info.setdefault("confirm_source", post_source)
+            ended = time.monotonic()
+            diagnostic = {
+                "submit_ms": (submitted - started) * 1000,
+                "resting_ms": ((cancel_started or ended) - resting) * 1000 if resting is not None else None,
+                "cancel_confirm_ms": (ended - cancel_started) * 1000 if cancel_started is not None else None,
+                "total_ms": (ended - started) * 1000,
+                "cancel_reason": cancel_reason, "cancel_detail": cancel_detail,
+            }
+            info["diagnostics"] = diagnostic
+            log.info("[%s] [ENTROPY DIAG] oid=%s status=%s %s", self.name,
+                     info.get("pending_oid", oid), info.get("status"), diagnostic)
             return info
 
         if err is not None:
@@ -566,7 +585,8 @@ class HLVenue:
                                 "filled_base": 0.0, "avg_px": None,
                                 "err": None, "unresolved": True})
 
-        deadline = time.monotonic() + max(ttl_sec, 0.0)
+        resting = time.monotonic()
+        deadline = resting + max(ttl_sec, 0.0)
         last_seen = None
         cancel_reason = "ttl"
         while True:
@@ -587,6 +607,11 @@ class HLVenue:
             now = time.monotonic()
             if not safe:
                 cancel_reason = "edge-or-book"
+                if cancel_diagnostic is not None:
+                    try:
+                        cancel_detail = cancel_diagnostic()
+                    except Exception:
+                        cancel_detail = "diagnostic-error"
                 break
             if now >= deadline:
                 break
@@ -594,6 +619,7 @@ class HLVenue:
 
         log.info("[%s] managed limit cancel (%s) oid=%s", self.name,
                  cancel_reason, oid)
+        cancel_started = time.monotonic()
         cancel_err = await self._cancel_by_oid(oid)
         settle_deadline = time.monotonic() + self.settle_timeout
         while time.monotonic() < settle_deadline:
