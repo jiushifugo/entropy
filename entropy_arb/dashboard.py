@@ -217,6 +217,12 @@ class Dashboard:
             cells.append(f'{labels[key] if zh else key}: {n} ({percent:.1f}%)')
         for i in range(0, len(cells), 2):
             table.add_row(cells[i], cells[i + 1])
+        for direction, detail in stats.direction_summary().items():
+            counts = detail['outcomes']
+            name = ("买 Entropy" if direction == "buy_entropy" else "卖 Entropy") if zh else direction
+            table.add_row(
+                f"{name}: full {counts.get('full', 0)} / partial {counts.get('partial', 0)} / zero {counts.get('no_fill', 0)} / err {counts.get('error', 0)}",
+                f"exp ${detail['expected_usd']:+.4f} / fill ${detail['realized_usd']:+.4f} / unknown {detail['unknown_realized']}")
         execution_total = sum(stats.executions.values())
         outcomes = {"full": "完整成交", "partial": "部分成交", "no_fill": "零成交", "error": "异常/未确认"}
         execution = " | ".join(f'{label if zh else key} {stats.executions[key]} ({stats.executions[key] / execution_total * 100 if execution_total else 0:.0f}%)' for key, label in outcomes.items())

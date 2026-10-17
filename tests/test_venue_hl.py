@@ -77,6 +77,9 @@ def test_managed_limit_cancels_then_reports_partial_fill():
         diag = result["diagnostics"]
         assert diag["cancel_reason"] == "partial-fill"
         assert diag["submit_ms"] >= 0
+        assert diag["sign_ms"] >= 0
+        assert diag["request_ms"] >= 0
+        assert abs(diag["sign_ms"] + diag["request_ms"] - diag["submit_ms"]) < .001
         assert diag["resting_ms"] >= 0
         assert diag["cancel_confirm_ms"] >= 0
         assert diag["total_ms"] >= diag["submit_ms"]

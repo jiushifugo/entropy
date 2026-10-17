@@ -915,6 +915,7 @@ class Engine:
             and hasattr(entropy, "send_managed_limit")
         )
         entropy_started = time.perf_counter()
+        distance = None
         if managed_entropy:
             top = entropy.book.best_ask() if entropy_is_buy else entropy.book.best_bid()
             distance = ((entropy_bound / top - 1) * 1e4 if entropy_is_buy else
@@ -1241,8 +1242,24 @@ class Engine:
         self._rotate_volume_stats(time.time())
         self._log_csv(direction, buy, sell, plan, completed_trade, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
-        self.volume_stats.record_execution(matched, plan.qty, cfg.net_tolerance_base,
-                                           hard_err or unresolved or asymmetric_fill)
+        outcome = self.volume_stats.record_execution(
+            matched, plan.qty, cfg.net_tolerance_base,
+            hard_err or unresolved or asymmetric_fill)
+        realized_known = (not unresolved and
+                          (matched <= cfg.net_tolerance_base or
+                           (binfo.get("avg_px") is not None and sinfo.get("avg_px") is not None)))
+        self.volume_stats.record_pair(
+            direction, outcome, entropy_info.get("diagnostics") or {},
+            plan.exp_edge_usd * matched / plan.qty if completed_trade else 0.0,
+            fill_edge if realized_known else None, crossing_bps=distance,
+            hedge_ms=hedge_elapsed_ms if hedge_requested_qty > 0 else None,
+            hedge_drift_bps=hedge_drift_bps if hedge_requested_qty > 0 else None)
+        log.info("[PAIR DIAG] %s outcome=%s matched=%.8g expected=$%.6f "
+                 "realized=%s hedge_ms=%.1f hedge_drift_bps=%+.3f", direction,
+                 outcome, matched,
+                 plan.exp_edge_usd * matched / plan.qty if completed_trade else 0.0,
+                 f"${fill_edge:.6f}" if realized_known else "unknown",
+                 hedge_elapsed_ms, hedge_drift_bps)
         self.last_trade_ts = time.time()
         return bool(unresolved)
 

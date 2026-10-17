@@ -544,6 +544,7 @@ class HLVenue:
                     "avg_px": None, "err": f"signing failed: {e!r}",
                     "unresolved": False}
 
+        signed = time.monotonic()
         body, err, unresolved, post_source = await self._post_action(payload)
         submitted = time.monotonic()
 
@@ -551,6 +552,8 @@ class HLVenue:
             info.setdefault("confirm_source", post_source)
             ended = time.monotonic()
             diagnostic = {
+                "sign_ms": (signed - started) * 1000,
+                "request_ms": (submitted - signed) * 1000,
                 "submit_ms": (submitted - started) * 1000,
                 "resting_ms": ((cancel_started or ended) - resting) * 1000 if resting is not None else None,
                 "cancel_confirm_ms": (ended - cancel_started) * 1000 if cancel_started is not None else None,

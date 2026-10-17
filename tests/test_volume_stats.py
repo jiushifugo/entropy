@@ -3,6 +3,33 @@ from test_engine import make_engine
 import time
 
 
+def test_directional_pair_metrics_and_rotation():
+    stats = VolumeStats()
+    stats.rotate(3600)
+    for value in range(1, 21):
+        stats.record_pair('sell_entropy', 'full', {'submit_ms': value}, .02, .01)
+    stats.record_pair('buy_entropy', 'error',
+                      {'cancel_detail': 'stale-book', 'submit_ms': None}, 0, None)
+    summary = stats.direction_summary()
+    sell = summary['sell_entropy']
+    assert sell['metrics']['submit_ms'] == {'n': 20, 'median': 10.5, 'p95': 19}
+    assert sell['expected_usd'] == .4 and sell['realized_usd'] == .2
+    assert summary['buy_entropy']['unknown_realized'] == 1
+    assert summary['buy_entropy']['cancels'] == {'stale-book': 1}
+    previous = stats.rotate(7200)
+    assert 'sell_entropy' in previous
+    assert stats.direction_summary() == {}
+
+
+def test_timing_memory_is_bounded():
+    stats = VolumeStats()
+    for value in range(10002):
+        stats.record_pair('buy_entropy', 'no_fill', {'submit_ms': value}, 0, 0)
+    detail = stats.direction_summary()['buy_entropy']
+    assert detail['outcomes']['no_fill'] == 10002
+    assert detail['metrics']['submit_ms']['n'] == 10000
+
+
 def test_hour_rotation_and_separate_denominators():
     stats = VolumeStats()
     assert stats.rotate(3600) is None
