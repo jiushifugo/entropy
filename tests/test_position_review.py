@@ -90,3 +90,24 @@ def test_incident_during_first_leg_does_not_send_stale_inventory_hedge(tmp_path)
         await eng._maybe_hedge()
         assert eng.hedges == 0
     asyncio.run(go())
+
+
+def test_unidentified_managed_order_sets_durable_review_lock(tmp_path):
+    async def go():
+        eng = make_engine(midline=0, upper=1, lower=1)
+        eng.cfg.daily_risk_state_file = str(tmp_path / 'risk.json')
+        eng.cfg.entropy_resting_ttl_sec = 1
+        e, h = eng.entropy, eng.hedge
+        e.set_book(100, 100.1)
+        h.set_book(100.3, 100.4)
+        plan, _ = eng._plan(e, h, 22)
+        async def unresolved(**kwargs):
+            return {'status': 'submit-unresolved', 'filled_base': .0005,
+                    'avg_px': None, 'err': None, 'unresolved': True}
+        e.send_managed_limit = unresolved
+        await eng._execute(e, h, plan)
+        assert eng._position_review_required and eng.halted
+        assert eng._position_review_reason == 'unresolved-managed-order'
+        assert (tmp_path / 'risk.json.position-review').exists()
+        assert eng._sends.get('hedge') is None
+    asyncio.run(go())

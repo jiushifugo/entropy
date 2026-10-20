@@ -1204,6 +1204,11 @@ class Engine:
             entropy_info.get("status") == "cancel-timeout"
             and entropy_info.get("pending_oid") is not None
         )
+        if managed_entropy and entropy_info.get("status") == "submit-unresolved":
+            self._require_position_review("unresolved-managed-order", {
+                "direction": direction, "confirmed_fill": entropy_fill,
+                "requested": plan.qty,
+                "note": "GTC order identity/finality unknown; inspect open orders and fills"})
         if pending_cancel:
             self._pending_entropy_oid = int(entropy_info["pending_oid"])
             log.warning("[ENTROPY PENDING] cancel confirmation timed out for "

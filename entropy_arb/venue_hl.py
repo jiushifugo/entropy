@@ -556,6 +556,8 @@ class HLVenue:
         cancel_reason = None
         cancel_detail = None
         oid = None
+        known_fill = 0.0
+        partial_submit = False
         order_req = {"coin": self.coin, "is_buy": is_buy,
                      "sz": round(qty, 8), "limit_px": limit_px,
                      "order_type": {"limit": {"tif": "Gtc"}},
@@ -599,10 +601,24 @@ class HLVenue:
         if not unresolved:
             parsed = self._parse(body)
             if parsed.get("status") == "filled":
-                return with_source(parsed)
+                known_fill = float(parsed.get("filled_base") or 0.0)
+                if not math.isfinite(known_fill) or known_fill < 0 or known_fill > qty + 1e-10:
+                    return with_source({"status": "submit-unresolved", "filled_base": 0.0,
+                                        "avg_px": None, "err": "invalid submitted fill size",
+                                        "unresolved": True})
+                if math.isfinite(known_fill) and abs(known_fill - qty) <= 1e-10:
+                    return with_source(parsed)
+                # A GTC action's filled response can describe only its
+                # immediate match. It does not prove the remainder is closed.
+                partial_submit = True
+                oid = parsed.get("oid")
+                log.warning("[%s] [GTC PARTIAL] submitted %.8g, immediate fill %.8g "
+                            "oid=%s — resolving and canceling remainder", self.name,
+                            qty, known_fill, oid)
             if parsed.get("err") is not None:
                 return with_source(parsed)
-            oid = self._resting_oid(body)
+            if oid is None:
+                oid = self._resting_oid(body)
         if oid is None:
             oid = await self._find_matching_open_order(
                 is_buy=is_buy, qty=qty, limit_px=limit_px,
@@ -611,15 +627,32 @@ class HLVenue:
             # It may have filled or been accepted without a discoverable open
             # order.  Do not submit or cancel anything else; force reconcile.
             return with_source({"status": "submit-unresolved",
-                                "filled_base": 0.0, "avg_px": None,
+                                "filled_base": known_fill, "avg_px": None,
                                 "err": None, "unresolved": True})
 
         resting = time.monotonic()
         deadline = resting + max(ttl_sec, 0.0)
         last_seen = None
         cancel_reason = "ttl"
+
+        def validated_status(status):
+            nonlocal known_fill
+            if status is None:
+                return None
+            state = str(status.get("status") or "").lower()
+            if state not in {"open", "filled", "rejected"} and not state.endswith(("canceled", "cancelled")):
+                return None
+            value = float(status.get("filled_base") or 0.0)
+            if (not math.isfinite(value) or value < known_fill - 1e-10
+                    or value > qty + 1e-10):
+                return None  # inconsistent/stale accounting is not finality
+            if status.get("status") == "filled" and abs(value - qty) > 1e-10:
+                return None
+            known_fill = max(known_fill, value)
+            return status
+
         while True:
-            status = await self._order_status(oid)
+            status = validated_status(await self._order_status(oid))
             if status is not None:
                 last_seen = status
                 if status["status"] != "open":
@@ -629,6 +662,9 @@ class HLVenue:
                     # remainder, then let the engine hedge this partial fill.
                     cancel_reason = "partial-fill"
                     break
+            if partial_submit:
+                cancel_reason = "partial-submit"
+                break
             try:
                 safe = bool(keep_open())
             except Exception:
@@ -652,7 +688,7 @@ class HLVenue:
         cancel_err = await self._cancel_by_oid(oid)
         settle_deadline = time.monotonic() + self.settle_timeout
         while time.monotonic() < settle_deadline:
-            status = await self._order_status(oid)
+            status = validated_status(await self._order_status(oid))
             if status is not None:
                 last_seen = status
                 if status["status"] != "open":
@@ -660,7 +696,7 @@ class HLVenue:
             await asyncio.sleep(0.20)
         # Never claim a clean cancellation when the final chain state is not
         # known: the engine will reconcile and pause strategy flow.
-        filled = float((last_seen or {}).get("filled_base") or 0.0)
+        filled = known_fill
         return with_source({"status": "cancel-timeout", "filled_base": filled,
                             "avg_px": None, "err": cancel_err,
                             "unresolved": True, "pending_oid": oid})
@@ -875,6 +911,7 @@ class HLVenue:
             return {"status": "filled",
                     "filled_base": float(f.get("totalSz") or 0.0),
                     "avg_px": float(f["avgPx"]) if f.get("avgPx") else None,
+                    "oid": f.get("oid"),
                     "err": None, "unresolved": False}
         if "error" in st:
             msg = str(st["error"])

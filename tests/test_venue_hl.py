@@ -33,6 +33,99 @@ class FakeWs:
         self.sent.append(json.loads(payload))
 
 
+def partial_submit_venue(final_status, final_qty, missing_oid=False, status_before_cancel=None):
+    venue = object.__new__(HLVenue)
+    venue.account, venue.asset_id = object(), 110000
+    venue.coin, venue.name = 'io:SNDK', 'ENTROPY'
+    venue.settle_timeout = .001
+    venue._signing = FakeSigning()
+    venue._signed_payload = lambda action: {'action': action}
+    venue.order_feed = None
+    calls = []
+    async def post(payload):
+        row = {'totalSz': '.0005', 'avgPx': '1373.5'}
+        if not missing_oid:
+            row['oid'] = 77
+        return ({'status': 'ok', 'response': {'data': {'statuses': [{'filled': row}]}}}, None, False)
+    async def status(oid):
+        calls.append(('status', oid))
+        if not any(c[0] == 'cancel' for c in calls):
+            return status_before_cancel
+        return {'status': final_status, 'filled_base': final_qty,
+                'avg_px': None, 'err': None, 'unresolved': False}
+    async def cancel(oid):
+        calls.append(('cancel', oid))
+        return None
+    async def find(**kwargs):
+        calls.append(('find', None))
+        return None
+    venue._post_exchange, venue._order_status = post, status
+    venue._cancel_by_oid, venue._find_matching_open_order = cancel, find
+    return venue, calls
+
+
+def test_partial_submit_cancel_captures_late_fills():
+    async def go():
+        for final_status, final_qty in [('filled', .0163), ('canceled', .002)]:
+            venue, calls = partial_submit_venue(final_status, final_qty)
+            result = await venue.send_managed_limit(is_buy=False, qty=.0163,
+                limit_px=1373.5, ttl_sec=1, keep_open=lambda: True)
+            assert ('cancel', 77) in calls
+            assert result['filled_base'] == final_qty
+            assert not result['unresolved']
+            assert result['diagnostics']['cancel_reason'] == 'partial-submit'
+    asyncio.run(go())
+
+
+def test_partial_submit_without_identity_stays_unresolved():
+    async def go():
+        venue, calls = partial_submit_venue('canceled', .0005, missing_oid=True)
+        result = await venue.send_managed_limit(is_buy=False, qty=.0163,
+            limit_px=1373.5, ttl_sec=1, keep_open=lambda: True)
+        assert result['unresolved'] and result['status'] == 'submit-unresolved'
+        assert result['filled_base'] == .0005
+        assert not any(c[0] == 'cancel' for c in calls)
+    asyncio.run(go())
+
+
+def test_partial_submit_rejects_stale_final_cumulative_size():
+    async def go():
+        venue, calls = partial_submit_venue('canceled', 0)
+        result = await venue.send_managed_limit(is_buy=False, qty=.0163,
+            limit_px=1373.5, ttl_sec=1, keep_open=lambda: True)
+        assert result['unresolved'] and result['pending_oid'] == 77
+        assert result['filled_base'] == .0005
+    asyncio.run(go())
+
+
+def test_partial_submit_already_closed_does_not_cancel_again():
+    async def go():
+        final = {'status': 'canceled', 'filled_base': .0005, 'avg_px': None,
+                 'err': None, 'unresolved': False}
+        venue, calls = partial_submit_venue('canceled', .0005, status_before_cancel=final)
+        result = await venue.send_managed_limit(is_buy=False, qty=.0163,
+            limit_px=1373.5, ttl_sec=1, keep_open=lambda: True)
+        assert not result['unresolved']
+        assert not any(c[0] == 'cancel' for c in calls)
+    asyncio.run(go())
+
+
+def test_full_submit_keeps_immediate_completion_path():
+    async def go():
+        venue, calls = partial_submit_venue('filled', .0163)
+        async def full(payload):
+            return ({'status': 'ok', 'response': {'data': {'statuses': [
+                {'filled': {'totalSz': '.0163', 'avgPx': '1373.5', 'oid': 77}}
+            ]}}}, None, False)
+        venue._post_exchange = full
+        result = await venue.send_managed_limit(is_buy=True, qty=.0163,
+            limit_px=1373.5, ttl_sec=1, keep_open=lambda: True)
+        assert not result['unresolved'] and result['filled_base'] == .0163
+        assert result['avg_px'] == 1373.5
+        assert not calls
+    asyncio.run(go())
+
+
 def test_managed_limit_cancels_then_reports_partial_fill():
     async def go():
         venue = object.__new__(HLVenue)
