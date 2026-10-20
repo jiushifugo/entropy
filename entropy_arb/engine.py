@@ -109,8 +109,41 @@ class Engine:
         # any late fill before trading resumes.
         self._pending_entropy_oid: Optional[int] = None
         self.volume_stats = VolumeStats()
+        self._position_review_required = False
+        self._position_review_reason = None
+        self._review_snapshots = {}
 
     # ------------------------------------------------------------- utilities
+
+    def _position_review_path(self):
+        return (self.cfg.daily_risk_state_file or "logs/daily_risk.json") + ".position-review"
+
+    def _require_position_review(self, reason, details):
+        self.halted = True
+        self._position_review_required = True
+        if self._position_review_reason is not None:
+            return
+        self._position_review_reason = reason
+        log.critical("[POSITION REVIEW] %s: %s — all strategy and automatic "
+                     "delta hedging locked; verify both accounts manually", reason, details)
+        self._reconcile_evt.set()
+        self._update_evt.set()
+        path = self._position_review_path()
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path + ".tmp", "w") as fh:
+                json.dump({"reason": reason, "details": details, "time": time.time()}, fh)
+            os.replace(path + ".tmp", path)
+        except Exception:
+            log.exception("[POSITION REVIEW] cannot persist safety lock; do not restart live")
+
+    def _load_position_review(self):
+        if os.path.exists(self._position_review_path()):
+            self._position_review_required = True
+            self._position_review_reason = "persisted-position-review"
+            self.halted = True
+            log.critical("[POSITION REVIEW] persisted lock found at %s; live "
+                         "orders disabled until manual account verification", self._position_review_path())
 
     def _vlock(self, key: str) -> asyncio.Lock:
         lock = self._venue_locks.get(key)
@@ -175,6 +208,11 @@ class Engine:
         self.entropy = self._make_venue(cfg.entropy)
         self.hedge = self._make_venue(cfg.hedge)
         self.venues = {"entropy": self.entropy, "hedge": self.hedge}
+        if live:
+            self._load_position_review()
+            for venue in self.venues.values():
+                venue.on_account_incident = lambda reason, details, v=venue: self._require_position_review(
+                    f"{v.key}:{reason}", details)
         await asyncio.gather(self.entropy.load_market(), self.hedge.load_market())
         self.markets_ready = True
 
@@ -544,7 +582,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted:
+        if self.halted or self._position_review_required:
             return
         if self._pending_entropy_oid is not None:
             return
@@ -1052,6 +1090,7 @@ class Engine:
         hedge_drift_bps = 0.0
         hedge_requested_qty = 0.0
         if (entropy_fill > cfg.net_tolerance_base
+                and not self._position_review_required
                 and not entropy_info.get("unresolved")
                 and entropy_info.get("err") is None):
             hedge_qty, hedge_is_buy, merged_residual, prior_net = \
@@ -1273,6 +1312,8 @@ class Engine:
             "ok": ok})
 
     async def _maybe_hedge(self) -> None:
+        if self._position_review_required:
+            return
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
             await self._hedge(net)
@@ -1280,6 +1321,8 @@ class Engine:
     async def _hedge(self, net: float) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
+        if self._position_review_required:
+            return
         cfg = self.cfg
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
@@ -1429,6 +1472,18 @@ class Engine:
                 self._update_evt.set()
             self._venue_fetch_fails[v.key] = 0
             delta = r - v.position
+            if not math.isfinite(r):
+                self._require_position_review("invalid-position", {"venue": v.key, "value": str(r)})
+                return
+            if self._position_review_required or (not strict and abs(delta) > self.cfg.net_tolerance_base):
+                if not self._position_review_required:
+                    self._require_position_review("unexpected-position-change", {
+                        "venue": v.key, "local": v.position, "reported": r, "delta": delta})
+                if self._review_snapshots.get(v.key) != r:
+                    log.warning("[POSITION REVIEW SNAPSHOT] %s reported=%+.8g local=%+.8g; "
+                                "not adopted, no automatic repair", v.key, r, v.position)
+                    self._review_snapshots[v.key] = r
+                return
             if abs(delta) > 1e-12:
                 if abs(delta) > self.cfg.net_tolerance_base:
                     log.warning("[%s] reconcile: chain %+.6g vs local %+.6g "
@@ -1575,7 +1630,7 @@ class Engine:
             self.risk_limited = False
             self._daily_loss_sample_streak = 0
             if self._risk_halted:
-                self.halted = False
+                self.halted = self._position_review_required
                 self._risk_halted = False
             self._save_daily_risk()
             log.warning("[DAILY RISK] new UTC day %s — counters reset", day)

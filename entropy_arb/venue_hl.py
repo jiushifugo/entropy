@@ -84,6 +84,12 @@ class HLOrderUpdatesFeed:
         self._post_seq = int(time.time() * 1000)
         self._ws = None
         self._send_lock = asyncio.Lock()
+        self.on_account_incident = None
+        self.started_ms = int(time.time() * 1000)
+
+    def _account_incident(self, reason, details):
+        if self.on_account_incident is not None:
+            self.on_account_incident(reason, details)
 
     @staticmethod
     def _key(cloid) -> str:
@@ -149,6 +155,22 @@ class HLOrderUpdatesFeed:
 
     def _handle_message(self, msg: dict) -> None:
         channel = msg.get("channel")
+        if channel == "user":
+            liquidation = (msg.get("data") or {}).get("liquidation")
+            if liquidation and str(liquidation.get("liquidated_user", "")).lower() == self.user:
+                self._account_incident("liquidation", liquidation)
+            return
+        if channel == "userFills":
+            data = msg.get("data") or {}
+            for fill in data.get("fills") or []:
+                liquidation = fill.get("liquidation")
+                if (fill.get("coin") != self.coin or liquidation is None
+                        or int(fill.get("time") or 0) < self.started_ms):
+                    continue
+                liquidated = str(liquidation.get("liquidatedUser") or self.user).lower()
+                if liquidated == self.user:
+                    self._account_incident("liquidation-fill", fill)
+            return
         if channel == "post":
             data = msg.get("data") or {}
             try:
@@ -233,6 +255,9 @@ class HLOrderUpdatesFeed:
                                       open_timeout=10, ping_interval=15,
                                       ping_timeout=15) as ws:
                     self._ws = ws
+                    for subscription in ("userFills", "userEvents"):
+                        await ws.send(json.dumps({"method": "subscribe", "subscription": {
+                            "type": subscription, "user": self.user}}))
                     await ws.send(json.dumps({
                         "method": "subscribe",
                         "subscription": {
@@ -366,6 +391,7 @@ class HLVenue:
             assert self.account is not None
             self.order_feed = HLOrderUpdatesFeed(
                 self.name, self.ws_url, self.account.query_address, self.coin)
+            self.order_feed.on_account_incident = getattr(self, "on_account_incident", None)
             tasks.append(asyncio.create_task(
                 self.order_feed.run(stop), name=f"orders-{self.key}"))
         return tasks

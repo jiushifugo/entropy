@@ -330,12 +330,18 @@ class Dashboard:
                   Text(f"${eng.daily_volume_usd:,.0f} / "
                        f"${cfg.daily_volume_limit_usd:,.0f}",
                        style="bold red" if eng.risk_limited else "dim"))
-        mode = ("HALTED" if eng.halted else
+        mode = ("POSITION-REVIEW" if eng._position_review_required else
+                "HALTED" if eng.halted else
                 "CLOSE-ONLY" if eng.risk_limited else
                 "PROFIT-ONLY" if eng.profit_only else "NORMAL")
         mode_style = ("bold red" if eng.halted or eng.risk_limited else
                       "bold yellow" if eng.profit_only else "dim")
         g.add_row("risk mode", Text(mode, style=mode_style))
+        if eng._position_review_required:
+            g.add_row("持仓需人工核验" if self.lang == "zh" else "Position review",
+                      Text(str(eng._position_review_reason), style="bold red"))
+            g.add_row("账户快照（非本地仓位）" if self.lang == "zh" else "Account snapshots",
+                      Text(str(eng._review_snapshots) or "pending", style="yellow"))
         eqs = [v.equity for v in eng.venues.values()]
         g.add_row(self._t("Σ equity"),
                   _usd(sum(eqs) if all(e is not None for e in eqs) else None,
@@ -344,7 +350,7 @@ class Dashboard:
         g.add_row(self._t("Σ fill edge"), _usd(eng.total_fill_edge))
         g.add_row(self._t("trades / hedges"),
                   Text(f"{eng.trades} / {eng.hedges}"))
-        g.add_row(self._t("net delta"), Text(f"{net:+.6g}",
+        g.add_row(self._t("net delta"), Text("UNKNOWN / 待核验" if eng._position_review_required else f"{net:+.6g}",
                   style="bold red" if abs(net) > cfg.net_tolerance_base
                   else "dim"))
         g.add_row(self._t("errors"), Text(str(eng.consec_errors),

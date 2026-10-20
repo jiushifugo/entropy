@@ -72,6 +72,18 @@ def test_volume_panel_chinese_and_narrow():
     assert "零成交 1 (50%)" in output
 
 
+def test_position_review_does_not_show_local_zero_as_confirmed_flat():
+    eng = make_engine()
+    eng._position_review_required = True
+    eng._position_review_reason = 'liquidation-fill'
+    eng.halted = True
+    eng._review_snapshots = {'entropy': .2173}
+    output = render(eng, lang='zh')
+    assert 'POSITION-REVIEW' in output
+    assert '待核验' in output
+    assert '0.2173' in output
+
+
 def make_engine():
     eng = Engine(make_cfg())
     eng.entropy = StubVenue("entropy", "ENTROPY")
