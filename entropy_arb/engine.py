@@ -112,6 +112,7 @@ class Engine:
         self._position_review_required = False
         self._position_review_reason = None
         self._review_snapshots = {}
+        self._execution_halted = False
 
     # ------------------------------------------------------------- utilities
 
@@ -268,6 +269,7 @@ class Engine:
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
+            tasks.append(asyncio.create_task(self._halt_exit_loop(), name="halt-exit"))
             tasks.append(asyncio.create_task(self._volume_stats_loop(), name="volume-stats"))
             tasks.append(asyncio.create_task(self._strategy_loop(),
                                              name="strategy"))
@@ -679,6 +681,9 @@ class Engine:
         except asyncio.CancelledError:
             raise
         except Exception:
+            if self.cfg.flatten_on_execution_halt:
+                self._require_position_review("execution-exception", {
+                    "note": "order outcome must be verified before automatic exit"})
             self._rotate_volume_stats(time.time())
             self.volume_stats.executions["error"] += 1
             log.exception("execute failed")
@@ -1199,6 +1204,8 @@ class Engine:
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
+        if unresolved and cfg.flatten_on_execution_halt:
+            self._require_position_review("execution-outcome-unknown", {"direction": direction})
         entropy_info = binfo if buy.key == "entropy" else sinfo
         pending_cancel = (
             entropy_info.get("status") == "cancel-timeout"
@@ -1261,6 +1268,7 @@ class Engine:
             # delta hedge after this method returns; stop admitting new pairs
             # now rather than retrying the same failing Arcus order twice more.
             self.halted = True
+            self._execution_halted = True
             log.critical("HALTED after Arcus hedge rejection with an Entropy "
                          "fill — emergency hedge follows; inspect the Arcus "
                          "rejection reason before restarting")
@@ -1270,6 +1278,7 @@ class Engine:
             self.consec_errors += 1
             if self.consec_errors >= cfg.max_consecutive_errors:
                 self.halted = True
+                self._execution_halted = True
                 log.critical("HALTED after %d consecutive execution problems "
                              "— flatten manually and restart / 连续执行异常，"
                              "引擎已停止，请手动平仓后重启", self.consec_errors)
@@ -1322,6 +1331,104 @@ class Engine:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
             await self._hedge(net)
+
+    async def _halt_exit_loop(self):
+        while not self.stop.is_set():
+            if self.cfg.flatten_on_execution_halt and self._execution_halted:
+                task = asyncio.create_task(self._halt_exit_once())
+                self._exec_tasks.add(task)
+                task.add_done_callback(self._exec_tasks.discard)
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("[HALT EXIT] verification/exit failed; no blind retry")
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _halt_exit_once(self):
+        """Opt-in bounded IOC reductions, only after both positions verify.
+
+        Never used for liquidation/review locks or unknown outstanding orders.
+        Locks cover both fresh account reads and the reduce-only sends.
+        """
+        if (not self.cfg.flatten_on_execution_halt or not self._execution_halted
+                or self._position_review_required or self.stop.is_set()
+                or self._pending_entropy_oid is not None):
+            return
+        venues = [self.entropy, self.hedge]
+        if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
+               for v in venues):
+            return
+        async with self._vlock(venues[0].key), self._vlock(venues[1].key):
+            # Two agreeing snapshots reduce (but cannot eliminate) REST lag.
+            for attempt in range(2):
+                positions = await asyncio.gather(*(v.fetch_position() for v in venues))
+                if self._position_review_required or self.stop.is_set():
+                    return
+                for v, position in zip(venues, positions):
+                    if not math.isfinite(position) or abs(position - v.position) > self.cfg.net_tolerance_base:
+                        self._require_position_review("halt-exit-position-mismatch", {
+                            "venue": v.key, "local": v.position, "reported": position})
+                        return
+                if attempt == 0:
+                    await asyncio.sleep(1)
+            # Check both routes before intentionally unpairing known inventory.
+            if any(abs(v.position) > 1e-12 and (
+                    v.key in self._venue_down or not v.book.is_fresh(self.cfg.staleness_sec)
+                    or not v.ready_to_trade() or self._venue_limited(v)
+                    or not self._venue_rate_ok(v)) for v in venues):
+                log.warning("[HALT EXIT] venue unavailable; inventory retained, manual attention required")
+                return
+            for v in venues:
+                if self._position_review_required or self.stop.is_set():
+                    return
+                if abs(v.position) <= 1e-12:
+                    continue
+                if (v.key in self._venue_down or not v.book.is_fresh(self.cfg.staleness_sec)
+                        or not v.ready_to_trade() or self._venue_limited(v)
+                        or not self._venue_rate_ok(v)):
+                    log.warning("[HALT EXIT] %s unavailable; inventory retained, manual attention required", v.name)
+                    return
+                is_buy = v.position < 0
+                ref = v.book.best_ask() if is_buy else v.book.best_bid()
+                if not ref:
+                    return
+                qty = floor_step(min(abs(v.position), self.cfg.max_order_notional / ref), self._step)
+                px = v.px_round(ref * (1 + self.cfg.hedge_slippage_bps / 1e4 if is_buy
+                                      else 1 - self.cfg.hedge_slippage_bps / 1e4), not is_buy)
+                if qty < v.min_base or qty * px < v.min_quote:
+                    log.warning("[HALT EXIT] %s residual below venue minimum; manual attention required", v.name)
+                    return
+                log.warning("[HALT EXIT] %s %s %.8g @%.8g reduce-only", v.name,
+                            "BUY" if is_buy else "SELL", qty, px)
+                self._record_send(v)
+                try:
+                    info = await v.send_taker(is_buy=is_buy, qty=qty, limit_px=px, reduce_only=True)
+                except Exception as exc:
+                    self._require_position_review("halt-exit-send-unknown", {"venue": v.key, "error": repr(exc)})
+                    return
+                if info.get("unresolved"):
+                    self._require_position_review("halt-exit-order-unknown", {"venue": v.key})
+                    return
+                fill = float(info.get("filled_base") or 0)
+                if not math.isfinite(fill) or fill < 0 or fill > qty + 1e-10:
+                    self._require_position_review("halt-exit-invalid-fill", {"venue": v.key, "fill": str(fill)})
+                    return
+                v.position += fill if is_buy else -fill
+                if fill:
+                    price = info.get("avg_px") or px
+                    v.cash += -fill * price * (1 + v.fee_bps / 1e4) if is_buy else fill * price * (1 - v.fee_bps / 1e4)
+                    v.volume_usd += fill * price
+                    self._add_daily_volume(fill * price)
+                v.last_traded_ts = time.time()
+                log.warning("[HALT EXIT] %s status=%s filled=%.8g remaining=%+.8g", v.name,
+                            info.get("status"), fill, v.position)
+                if info.get("err") or fill <= 0:
+                    return
 
     async def _hedge(self, net: float) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
@@ -1635,7 +1742,7 @@ class Engine:
             self.risk_limited = False
             self._daily_loss_sample_streak = 0
             if self._risk_halted:
-                self.halted = self._position_review_required
+                self.halted = self._position_review_required or self._execution_halted
                 self._risk_halted = False
             self._save_daily_risk()
             log.warning("[DAILY RISK] new UTC day %s — counters reset", day)

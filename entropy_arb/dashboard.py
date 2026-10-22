@@ -331,6 +331,7 @@ class Dashboard:
                        f"${cfg.daily_volume_limit_usd:,.0f}",
                        style="bold red" if eng.risk_limited else "dim"))
         mode = ("POSITION-REVIEW" if eng._position_review_required else
+                "HALTED-EXIT" if eng._execution_halted and cfg.flatten_on_execution_halt else
                 "HALTED" if eng.halted else
                 "CLOSE-ONLY" if eng.risk_limited else
                 "PROFIT-ONLY" if eng.profit_only else "NORMAL")
