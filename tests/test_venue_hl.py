@@ -33,6 +33,17 @@ class FakeWs:
         self.sent.append(json.loads(payload))
 
 
+def test_order_status_missing_size_is_not_confirmed_zero_fill():
+    async def go():
+        venue = object.__new__(HLVenue)
+        venue.account = SimpleNamespace(query_address='0x123')
+        async def malformed(payload):
+            return {'status': 'order', 'order': {'status': 'canceled', 'order': {}}}
+        venue._info = malformed
+        assert await venue._order_status(77) is None
+    asyncio.run(go())
+
+
 def partial_submit_venue(final_status, final_qty, missing_oid=False, status_before_cancel=None):
     venue = object.__new__(HLVenue)
     venue.account, venue.asset_id = object(), 110000

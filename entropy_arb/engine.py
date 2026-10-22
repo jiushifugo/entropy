@@ -108,6 +108,7 @@ class Engine:
         # until its final state is known; position reconciliation then handles
         # any late fill before trading resumes.
         self._pending_entropy_oid: Optional[int] = None
+        self._pending_cancel_context = None
         self.volume_stats = VolumeStats()
         self._position_review_required = False
         self._position_review_reason = None
@@ -122,6 +123,9 @@ class Engine:
     def _require_position_review(self, reason, details):
         self.halted = True
         self._position_review_required = True
+        if self._position_review_reason == "managed-cancel-pending" and reason != "managed-cancel-pending":
+            # A new liquidation/mismatch must supersede a recoverable timeout.
+            self._position_review_reason = None
         if self._position_review_reason is not None:
             return
         self._position_review_reason = reason
@@ -143,8 +147,26 @@ class Engine:
             self._position_review_required = True
             self._position_review_reason = "persisted-position-review"
             self.halted = True
+            try:
+                with open(self._position_review_path()) as fh:
+                    saved = json.load(fh)
+                ctx = saved.get("details", {})
+                if (saved.get("reason") == "managed-cancel-pending"
+                        and ctx.get("identity") == [self.cfg.entropy.symbol, self.cfg.hedge_venue]
+                        and isinstance(ctx.get("oid"), int)
+                        and ctx["oid"] > 0
+                        and math.isfinite(ctx["known_fill"]) and 0 <= ctx["known_fill"] <= ctx["requested"]
+                        and math.isfinite(ctx["requested"]) and ctx["requested"] > 0
+                        and set(ctx["positions"]) == {"entropy", "hedge"}
+                        and all(math.isfinite(p) for p in ctx["positions"].values())):
+                    self._pending_cancel_context = ctx
+                    self._pending_entropy_oid = ctx["oid"]
+                    self._position_review_reason = "managed-cancel-pending"
+            except (OSError, ValueError, TypeError, KeyError):
+                pass  # Old or incomplete locks always remain manual-review.
             log.critical("[POSITION REVIEW] persisted lock found at %s; live "
-                         "orders disabled until manual account verification", self._position_review_path())
+                         "orders disabled; complete timeout contexts will be reverified, "
+                         "other locks require manual review", self._position_review_path())
 
     def _vlock(self, key: str) -> asyncio.Lock:
         lock = self._venue_locks.get(key)
@@ -1204,8 +1226,6 @@ class Engine:
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
-        if unresolved and cfg.flatten_on_execution_halt:
-            self._require_position_review("execution-outcome-unknown", {"direction": direction})
         entropy_info = binfo if buy.key == "entropy" else sinfo
         pending_cancel = (
             entropy_info.get("status") == "cancel-timeout"
@@ -1218,9 +1238,18 @@ class Engine:
                 "note": "GTC order identity/finality unknown; inspect open orders and fills"})
         if pending_cancel:
             self._pending_entropy_oid = int(entropy_info["pending_oid"])
+            self._pending_cancel_context = {
+                "oid": self._pending_entropy_oid, "known_fill": float(entropy_info.get("filled_base") or 0),
+                "requested": plan.qty,
+                "identity": [cfg.entropy.symbol, cfg.hedge_venue],
+                "positions": {v.key: v.position for v in self.venues.values()},
+            }
+            self._require_position_review("managed-cancel-pending", self._pending_cancel_context)
             log.warning("[ENTROPY PENDING] cancel confirmation timed out for "
                         "oid=%s — new entries paused until final state is "
                         "confirmed", self._pending_entropy_oid)
+        elif unresolved and cfg.flatten_on_execution_halt:
+            self._require_position_review("execution-outcome-unknown", {"direction": direction})
         hard_err = (binfo.get("err") is not None
                     or sinfo.get("err") is not None)
         rate_limited = False
@@ -1507,6 +1536,11 @@ class Engine:
 
     async def _reconcile_positions(self, hedge: bool,
                                    strict: bool = False) -> None:
+        if self._pending_cancel_context is not None and self._position_review_reason == "managed-cancel-pending":
+            # Do not run ordinary mismatch adoption/escalation ahead of the
+            # order-specific verification, especially after a process restart.
+            await self._resolve_pending_entropy_order()
+            return
         now = time.time()
         vs = []
         for v in self.venues.values():
@@ -1533,6 +1567,9 @@ class Engine:
         oid = self._pending_entropy_oid
         if oid is None or not hasattr(self.entropy, "resolve_managed_order"):
             return
+        if self._pending_cancel_context is not None:
+            await self._verify_pending_cancel()
+            return
         async with self._vlock(self.entropy.key):
             # It may have been cleared while awaiting the venue lock.
             if self._pending_entropy_oid != oid:
@@ -1544,10 +1581,69 @@ class Engine:
             return
         self._pending_entropy_oid = None
         self.consec_errors = 0
-        log.warning("[ENTROPY PENDING] oid=%s resolved as %s — strategy "
-                    "may resume after position reconciliation", oid,
-                    status.get("status", "unknown"))
+        log.warning("[ENTROPY PENDING] oid=%s resolved as %s; existing review/risk "
+                    "locks remain in effect", oid, status.get("status", "unknown"))
         self._update_evt.set()
+
+    async def _verify_pending_cancel(self):
+        ctx = self._pending_cancel_context
+        if not ctx or self._position_review_reason != "managed-cancel-pending":
+            return
+        venues = [self.entropy, self.hedge]
+        if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC for v in venues):
+            return
+        async with self._vlock("entropy"), self._vlock("hedge"):
+            for attempt in range(2):
+                status = await self.entropy.resolve_managed_order(ctx["oid"])
+                if status is None or "filled_base" not in status or status.get("unresolved") or status.get("err"):
+                    return
+                state = str(status.get("status") or "").lower()
+                if state not in {"filled", "rejected"} and not state.endswith(("canceled", "cancelled")):
+                    return
+                fill = float(status.get("filled_base") or 0)
+                if not math.isfinite(fill) or abs(fill - ctx["known_fill"]) > 1e-10:
+                    self._require_position_review("pending-order-fill-changed", {
+                        "oid": ctx["oid"], "accounted": ctx["known_fill"], "final": str(fill)})
+                    return
+                if state == "filled" and abs(fill - ctx["requested"]) > 1e-10:
+                    return
+                positions = await asyncio.gather(*(v.fetch_position() for v in venues))
+                if self._position_review_reason != "managed-cancel-pending" or self.stop.is_set():
+                    return
+                for v, position in zip(venues, positions):
+                    self._review_snapshots[v.key] = position
+                    if not math.isfinite(position) or abs(position - ctx["positions"][v.key]) > 1e-10:
+                        self._require_position_review("pending-order-position-mismatch", {
+                            "oid": ctx["oid"], "venue": v.key, "expected": ctx["positions"][v.key],
+                            "reported": str(position)})
+                        return
+                if attempt == 0:
+                    await asyncio.sleep(1)
+            if self._position_review_reason != "managed-cancel-pending":
+                return
+            # Only archive the exact order-specific marker we verified.
+            path = self._position_review_path()
+            try:
+                with open(path) as fh:
+                    saved = json.load(fh)
+                if saved.get("reason") != "managed-cancel-pending" or saved.get("details") != ctx:
+                    return
+                os.replace(path, path + f".verified-{time.time_ns()}")
+            except (OSError, ValueError):
+                log.exception("[ENTROPY PENDING] cannot archive verified timeout lock; remains paused")
+                return
+            for v, position in zip(venues, positions):
+                v.position = position
+            self._pending_entropy_oid = None
+            self._pending_cancel_context = None
+            self._position_review_required = False
+            self._position_review_reason = None
+            self._review_snapshots = {}
+            self.halted = self._execution_halted or self._risk_halted
+            log.warning("[ENTROPY PENDING VERIFIED] oid=%s final=%s fill=%.8g; two account "
+                        "checks agree; timeout-only lock archived, other risk gates unchanged",
+                        ctx["oid"], state, fill)
+            self._update_evt.set()
 
     async def _reconcile_venue(self, v, strict: bool) -> None:
         async with self._vlock(v.key):

@@ -450,11 +450,14 @@ class HLVenue:
         status = str(wrapped.get("status", "unknown"))
         order = wrapped.get("order") or {}
         try:
-            original = float(order.get("origSz") or 0.0)
-            remaining = float(order.get("sz") or 0.0)
+            original = float(order["origSz"])
+            remaining = float(order["sz"])
+            if (not math.isfinite(original) or not math.isfinite(remaining)
+                    or original <= 0 or remaining < 0 or remaining > original):
+                return None
             filled = max(original - remaining, 0.0)
-        except (TypeError, ValueError):
-            filled = 0.0
+        except (KeyError, TypeError, ValueError):
+            return None
         return {"status": status, "filled_base": filled, "avg_px": None,
                 "err": None, "unresolved": False}
 
