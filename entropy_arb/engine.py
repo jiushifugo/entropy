@@ -31,6 +31,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
 from .volume_stats import VolumeStats
+from .position_risk import entry_block_reason
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
@@ -291,6 +292,7 @@ class Engine:
             tasks.append(asyncio.create_task(self.recorder.run(self.stop),
                                              name="recorder"))
         if not self.record_only:
+            tasks.append(asyncio.create_task(self._position_risk_loop(), name="position-risk"))
             tasks.append(asyncio.create_task(self._halt_exit_loop(), name="halt-exit"))
             tasks.append(asyncio.create_task(self._volume_stats_loop(), name="volume-stats"))
             tasks.append(asyncio.create_task(self._strategy_loop(),
@@ -659,6 +661,8 @@ class Engine:
             return "no_edge"
         if plan is None:
             return "depth"
+        if self._position_risk_block(buy.key == "entropy", plan.qty):
+            return "risk"
         net = self._budgeted_net_bps(buy, sell, plan)
         if self.profit_only and net + 1e-9 < cfg.profit_only_min_bps:
             return "risk"
@@ -777,6 +781,8 @@ class Engine:
                 self._schedule_poke(cfg.premium_persist_sec - (now - armed))
                 continue
             if plan is None:
+                continue
+            if self._position_risk_block(buy.key == "entropy", plan.qty):
                 continue
             if not self._profit_only_plan_ok(dkey, buy, sell, plan):
                 continue
@@ -898,6 +904,8 @@ class Engine:
             return "shutdown"
         if self.halted or self.risk_limited:
             return "risk"
+        if self._position_risk_block(entropy_is_buy, 0.0):
+            return "position-risk"
         if entropy.key in self._venue_down or hedge.key in self._venue_down:
             return "venue-down"
         if not entropy.book.is_fresh(cfg.staleness_sec) or not hedge.book.is_fresh(cfg.staleness_sec):
@@ -932,6 +940,10 @@ class Engine:
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
         if self.halted:
+            return False
+        block = self._position_risk_block(buy.key == "entropy", plan.qty)
+        if block:
+            self._skiplog("strategy paused: %s", block)
             return False
         cfg = self.cfg
         # A pre-existing dust residual can be below a venue's minimum order
@@ -1718,6 +1730,32 @@ class Engine:
                 raise
             except Exception:
                 log.exception("reconcile failed")
+
+    def _position_risk_block(self, is_buy, qty):
+        if not getattr(self.cfg, "position_risk_guard_enabled", False):
+            return None
+        return entry_block_reason(
+            getattr(self, "position_risk_snapshot", None),
+            getattr(self, "position_risk_error", None), self.entropy.position,
+            is_buy, qty, self.cfg.position_risk_min_distance_pct,
+            self.cfg.position_risk_max_age_sec)
+
+    async def _position_risk_loop(self):
+        while not self.stop.is_set():
+            try:
+                self.position_risk_snapshot = await self.entropy.fetch_position_risk()
+                self.position_risk_error = None
+                log.info("[POSITION RISK] %s", self.position_risk_snapshot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.position_risk_error = str(exc)
+                log.warning("[POSITION RISK] unavailable: %s", exc)
+            self._update_evt.set()
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
 
     async def _balance_loop(self) -> None:
         while not self.stop.is_set():

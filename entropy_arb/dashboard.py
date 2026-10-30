@@ -339,6 +339,24 @@ class Dashboard:
         mode_style = ("bold red" if eng.halted or eng.risk_limited else
                       "bold yellow" if eng.profit_only else "dim")
         g.add_row("risk mode", Text(mode, style=mode_style))
+        snapshot = getattr(eng, "position_risk_snapshot", None)
+        risk_error = getattr(eng, "position_risk_error", None)
+        risk_label = "Entropy逐仓风险" if self.lang == "zh" else "Entropy margin risk"
+        if risk_error or not snapshot:
+            risk_text = "UNKNOWN / 待核验" if self.lang == "zh" else "UNKNOWN"
+        elif time.time() - snapshot["observed_at"] > getattr(cfg, "position_risk_max_age_sec", 15):
+            risk_text = "STALE / 数据过期"
+        elif snapshot["position"] == 0:
+            risk_text = "FLAT / 无仓位（非保证金充足）"
+        else:
+            risk_text = (f'{snapshot["mode"]} {snapshot["leverage"]:g}x | '
+                         f'margin ${snapshot["margin_used"]:.2f}')
+            g.add_row("mark / liq / distance",
+                      Text(f'{snapshot["mark_px"]:.4f} / {snapshot["liquidation_px"]:.4f}'
+                           f' / {snapshot["distance_pct"]:.2f}%'))
+        g.add_row(risk_label, Text(risk_text, style="yellow"))
+        g.add_row("position risk entry guard",
+                  Text("ON" if getattr(cfg, "position_risk_guard_enabled", False) else "OFF (observe only)"))
         if eng._position_review_required:
             g.add_row("持仓需人工核验" if self.lang == "zh" else "Position review",
                       Text(str(eng._position_review_reason), style="bold red"))

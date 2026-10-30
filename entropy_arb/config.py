@@ -22,6 +22,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -174,6 +175,9 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    position_risk_guard_enabled: bool = False
+    position_risk_min_distance_pct: float = 0.0
+    position_risk_max_age_sec: float = 15.0
 
     @property
     def creds_complete(self) -> bool:
@@ -222,6 +226,9 @@ _SCHEMA: Dict[str, Any] = {
         "max_paired_layers": int,
     },
     "risk": {
+        "position_risk_guard_enabled": bool,
+        "position_risk_min_distance_pct": float,
+        "position_risk_max_age_sec": float,
         "daily_loss_limit_usd": float,
         "daily_loss_action": str,
         "profit_only_min_bps": float,
@@ -431,6 +438,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "entropy_leg_slippage_bps")
     daily_loss_action = str(_get(
         raw, "risk", "daily_loss_action", "halt")).strip().lower()
+    guard_enabled = bool(_get(raw, "risk", "position_risk_guard_enabled", False))
+    guard_distance = float(_get(raw, "risk", "position_risk_min_distance_pct", 0.0))
+    guard_age = float(_get(raw, "risk", "position_risk_max_age_sec", 15.0))
+    if not math.isfinite(guard_distance) or not 0 <= guard_distance < 100:
+        raise ConfigError("risk.position_risk_min_distance_pct must be in [0, 100)")
+    if not math.isfinite(guard_age) or not 0 < guard_age <= 15:
+        raise ConfigError("risk.position_risk_max_age_sec must be in (0, 15]")
+    if guard_enabled and guard_distance <= 0:
+        raise ConfigError("set a positive position risk distance before enabling the guard")
     daily_loss_action = daily_loss_action.replace("-", "_")
     if daily_loss_action not in ("halt", "profit_only"):
         raise ConfigError("risk.daily_loss_action must be 'halt' or "
@@ -479,6 +495,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         daily_loss_limit_usd=float(_get(
             raw, "risk", "daily_loss_limit_usd", 0.0)),
         daily_loss_action=daily_loss_action,
+        position_risk_guard_enabled=guard_enabled,
+        position_risk_min_distance_pct=guard_distance,
+        position_risk_max_age_sec=guard_age,
         profit_only_min_bps=profit_only_min_bps,
         daily_volume_limit_usd=float(_get(
             raw, "risk", "daily_volume_limit_usd", 0.0)),

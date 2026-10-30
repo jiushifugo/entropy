@@ -33,6 +33,7 @@ except ImportError:
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import HLBookFeed
+from .position_risk import parse_position_risk
 
 log = logging.getLogger("hl")
 
@@ -964,6 +965,22 @@ class HLVenue:
             eq += float(ms.get("accountValue") or 0.0)
             fr += float(st.get("withdrawable") or 0.0)
         return eq, fr
+
+    async def fetch_position_risk(self):
+        """Never uses book mid as a substitute for the liquidation mark."""
+        addr = self._query_address()
+        if addr is None:
+            raise ValueError("account identity unavailable")
+        state = await self._info({"type": "clearinghouseState", "user": addr,
+                                  "dex": self.conf.hl_dex})
+        # Flat accounts don't need a second request, but still require a valid
+        # timestamp and an explicit assetPositions list.
+        has_position = any((row.get("position") or {}).get("coin") == self.coin
+                           for row in state.get("assetPositions", []))
+        contexts = None
+        if has_position:
+            contexts = await self._info({"type": "metaAndAssetCtxs", "dex": self.conf.hl_dex})
+        return parse_position_risk(state, self.coin, contexts)
 
     async def fetch_position(self) -> float:
         addr = self._query_address()
