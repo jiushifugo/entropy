@@ -332,6 +332,7 @@ class Dashboard:
                        style="bold red" if eng.risk_limited else "dim"))
         mode = ("ORDER-VERIFY" if eng._position_review_reason == "managed-cancel-pending" else
                 "POSITION-REVIEW" if eng._position_review_required else
+                "RISK-EXIT" if getattr(eng, "_position_risk_exit_active", False) else
                 "HALTED-EXIT" if eng._execution_halted and cfg.flatten_on_execution_halt else
                 "HALTED" if eng.halted else
                 "CLOSE-ONLY" if eng.risk_limited else
@@ -357,6 +358,8 @@ class Dashboard:
         g.add_row(risk_label, Text(risk_text, style="yellow"))
         g.add_row("position risk entry guard",
                   Text("ON" if getattr(cfg, "position_risk_guard_enabled", False) else "OFF (observe only)"))
+        g.add_row("position risk auto exit",
+                  Text("ON" if getattr(cfg, "position_risk_exit_enabled", False) else "OFF"))
         if eng._position_review_required:
             g.add_row("持仓需人工核验" if self.lang == "zh" else "Position review",
                       Text(str(eng._position_review_reason), style="bold red"))

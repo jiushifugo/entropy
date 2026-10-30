@@ -178,6 +178,8 @@ class Config:
     position_risk_guard_enabled: bool = False
     position_risk_min_distance_pct: float = 0.0
     position_risk_max_age_sec: float = 15.0
+    position_risk_exit_enabled: bool = False
+    position_risk_exit_distance_pct: float = 0.0
 
     @property
     def creds_complete(self) -> bool:
@@ -229,6 +231,8 @@ _SCHEMA: Dict[str, Any] = {
         "position_risk_guard_enabled": bool,
         "position_risk_min_distance_pct": float,
         "position_risk_max_age_sec": float,
+        "position_risk_exit_enabled": bool,
+        "position_risk_exit_distance_pct": float,
         "daily_loss_limit_usd": float,
         "daily_loss_action": str,
         "profit_only_min_bps": float,
@@ -447,6 +451,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("risk.position_risk_max_age_sec must be in (0, 15]")
     if guard_enabled and guard_distance <= 0:
         raise ConfigError("set a positive position risk distance before enabling the guard")
+    risk_exit_enabled = bool(_get(raw, "risk", "position_risk_exit_enabled", False))
+    risk_exit_distance = float(_get(raw, "risk", "position_risk_exit_distance_pct", 0.0))
+    if not math.isfinite(risk_exit_distance) or not 0 <= risk_exit_distance < 100:
+        raise ConfigError("risk.position_risk_exit_distance_pct must be in [0, 100)")
+    if risk_exit_enabled and (not guard_enabled or not 0 < risk_exit_distance < guard_distance):
+        raise ConfigError("risk exit requires entry guard and 0 < exit distance < entry distance")
     daily_loss_action = daily_loss_action.replace("-", "_")
     if daily_loss_action not in ("halt", "profit_only"):
         raise ConfigError("risk.daily_loss_action must be 'halt' or "
@@ -498,6 +508,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         position_risk_guard_enabled=guard_enabled,
         position_risk_min_distance_pct=guard_distance,
         position_risk_max_age_sec=guard_age,
+        position_risk_exit_enabled=risk_exit_enabled,
+        position_risk_exit_distance_pct=risk_exit_distance,
         profit_only_min_bps=profit_only_min_bps,
         daily_volume_limit_usd=float(_get(
             raw, "risk", "daily_volume_limit_usd", 0.0)),

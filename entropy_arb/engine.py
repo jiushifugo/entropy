@@ -115,6 +115,7 @@ class Engine:
         self._position_review_reason = None
         self._review_snapshots = {}
         self._execution_halted = False
+        self._position_risk_exit_active = False
 
     # ------------------------------------------------------------- utilities
 
@@ -144,6 +145,14 @@ class Engine:
             log.exception("[POSITION REVIEW] cannot persist safety lock; do not restart live")
 
     def _load_position_review(self):
+        # A risk exit must never be cleared by a process restart, even flat.
+        risk_exit_path = self._position_review_path() + ".risk-exit"
+        if os.path.exists(risk_exit_path):
+            self.halted = self._position_review_required = True
+            self._position_review_reason = "persisted-position-risk-exit"
+            log.critical("[POSITION REVIEW] risk exit marker at %s; manual account "
+                         "verification required; no automatic resume", risk_exit_path)
+            return  # preserve other incident files; never auto-recover a timeout here
         if os.path.exists(self._position_review_path()):
             self._position_review_required = True
             self._position_review_reason = "persisted-position-review"
@@ -1375,8 +1384,9 @@ class Engine:
 
     async def _halt_exit_loop(self):
         while not self.stop.is_set():
-            if self.cfg.flatten_on_execution_halt and self._execution_halted:
-                task = asyncio.create_task(self._halt_exit_once())
+            risk_exit = self._position_risk_exit_active
+            if risk_exit or (self.cfg.flatten_on_execution_halt and self._execution_halted):
+                task = asyncio.create_task(self._position_risk_exit_once() if risk_exit else self._halt_exit_once())
                 self._exec_tasks.add(task)
                 task.add_done_callback(self._exec_tasks.discard)
                 try:
@@ -1740,12 +1750,152 @@ class Engine:
             is_buy, qty, self.cfg.position_risk_min_distance_pct,
             self.cfg.position_risk_max_age_sec)
 
+    def _consider_position_risk_exit(self):
+        """Latch only on fresh, identity-checked data matching settled inventory."""
+        if (not self.cfg.position_risk_exit_enabled or self._position_risk_exit_active
+                or self._position_review_required or self.stop.is_set()
+                or self._pending_entropy_oid is not None
+                or getattr(self, "position_risk_error", None)):
+            return
+        snapshot = getattr(self, "position_risk_snapshot", None)
+        now = time.time()
+        if not snapshot or not 0 <= now - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec:
+            return
+        if any(self._vlock(v.key).locked() or now - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
+               for v in self.venues.values()):
+            return
+        if (snapshot["position"] == 0 or snapshot["mode"] != "isolated"
+                or abs(snapshot["position"] - self.entropy.position) > 1e-10
+                or snapshot["distance_pct"] > self.cfg.position_risk_exit_distance_pct):
+            return
+        self.halted = self._execution_halted = True
+        path = self._position_review_path() + ".risk-exit"
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            # Exclusive create: never overwrite an existing incident record.
+            with open(path, "x") as fh:
+                json.dump({"reason": "position-risk-exit", "snapshot": snapshot,
+                           "identity": [self.cfg.symbol, self.cfg.hedge_venue], "time": now}, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception as exc:
+            self._require_position_review("risk-exit-persist-failed", {"error": str(exc)})
+            return
+        self._position_risk_exit_active = True
+        log.critical("[POSITION RISK EXIT] latched: distance %.3f%% <= %.3f%%; "
+                     "strategy stopped; verified reduce-only exit follows; no automatic resume",
+                     snapshot["distance_pct"], self.cfg.position_risk_exit_distance_pct)
+        self._update_evt.set()
+
+    async def _position_risk_exit_once(self):
+        """Bounded paired reduction. Never submits again after an unknown result."""
+        if (not self._position_risk_exit_active or not self.cfg.position_risk_exit_enabled
+                or self._position_review_required or self.stop.is_set()
+                or self._pending_entropy_oid is not None):
+            return
+        venues = [self.entropy, self.hedge]
+        if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
+               for v in venues):
+            return
+        async with self._vlock(venues[0].key), self._vlock(venues[1].key):
+            for attempt in range(2):
+                try:
+                    positions = await asyncio.gather(*(v.fetch_position() for v in venues))
+                except Exception as exc:
+                    log.error("[POSITION RISK EXIT] account verification unavailable: %s; no orders", exc)
+                    return
+                if self._position_review_required or self.stop.is_set():
+                    return
+                for v, position in zip(venues, positions):
+                    if not math.isfinite(position) or abs(position - v.position) > 1e-10:
+                        self._require_position_review("risk-exit-position-mismatch", {
+                            "venue": v.key, "local": v.position, "reported": str(position)})
+                        return
+                if attempt == 0:
+                    await asyncio.sleep(1)
+            if all(abs(v.position) <= 1e-12 for v in venues):
+                return  # remain latched, including across restarts
+            if (self.entropy.position * self.hedge.position >= 0
+                    or abs(self.entropy.position + self.hedge.position) > 1e-10):
+                self._require_position_review("risk-exit-unpaired-inventory", {
+                    v.key: v.position for v in venues})
+                return
+            # Validate BOTH routes and BOTH minimums before reducing the first leg.
+            routes = []
+            for v in venues:
+                if (v.key in self._venue_down or not v.book.is_fresh(self.cfg.staleness_sec)
+                        or not v.ready_to_trade() or self._venue_limited(v) or not self._venue_rate_ok(v)):
+                    log.error("[POSITION RISK EXIT] %s unavailable; no orders; manual attention required", v.name)
+                    return
+                buy = v.position < 0
+                ref = v.book.best_ask() if buy else v.book.best_bid()
+                if not ref or not math.isfinite(ref) or ref <= 0:
+                    return
+                px = v.px_round(ref * (1 + self.cfg.hedge_slippage_bps / 1e4 if buy
+                                      else 1 - self.cfg.hedge_slippage_bps / 1e4), not buy)
+                if not math.isfinite(px) or px <= 0:
+                    return
+                routes.append((v, buy, ref, px))
+            qty = floor_step(min(abs(self.entropy.position), abs(self.hedge.position),
+                                 *(self.cfg.max_order_notional / r[2] for r in routes)), self._step)
+            if any(qty < v.min_base or qty * px < v.min_quote for v, _, _, px in routes):
+                self._require_position_review("risk-exit-dust", {"qty": qty})
+                return
+            confirmed = None
+            for v, buy, _, px in routes:
+                if self._position_review_required or self.stop.is_set():
+                    return
+                send_qty = qty if confirmed is None else confirmed
+                # First leg can partially fill. Never close more on the hedge.
+                if (send_qty < v.min_base or send_qty * px < v.min_quote
+                        or not v.book.is_fresh(self.cfg.staleness_sec)
+                        or not v.ready_to_trade() or self._venue_limited(v)):
+                    self._require_position_review("risk-exit-route-changed", {"venue": v.key, "qty": send_qty})
+                    return
+                self._record_send(v)
+                log.warning("[POSITION RISK EXIT] %s %s %.8g @%.8g reduce-only",
+                            v.name, "BUY" if buy else "SELL", send_qty, px)
+                try:
+                    info = await v.send_taker(is_buy=buy, qty=send_qty, limit_px=px, reduce_only=True)
+                    if info.get("unresolved") or info.get("status") not in ("filled", "canceled", "rejected"):
+                        raise ValueError("unknown order outcome")
+                    if "filled_base" not in info:
+                        raise ValueError("missing confirmed fill quantity")
+                    if isinstance(info["filled_base"], bool):
+                        raise ValueError("invalid boolean fill")
+                    fill = float(info["filled_base"])
+                    if not math.isfinite(fill) or fill < 0 or fill > send_qty + 1e-10:
+                        raise ValueError("invalid fill quantity")
+                    price = float(info.get("avg_px") or px)
+                    if not math.isfinite(price) or price <= 0:
+                        raise ValueError("invalid fill price")
+                except Exception as exc:
+                    self._require_position_review("risk-exit-order-unknown", {"venue": v.key, "error": str(exc)})
+                    return
+                v.position += fill if buy else -fill
+                v.last_traded_ts = time.time()
+                if fill:
+                    v.cash += -fill * price * (1 + v.fee_bps / 1e4) if buy else fill * price * (1 - v.fee_bps / 1e4)
+                    v.volume_usd += fill * price
+                    self._add_daily_volume(fill * price)
+                log.warning("[POSITION RISK EXIT] %s status=%s filled=%.8g remaining=%+.8g",
+                            v.name, info.get("status"), fill, v.position)
+                if confirmed is None:
+                    if fill <= 0:
+                        return  # known no fill; no hedge send
+                    confirmed = fill
+                elif abs(fill - confirmed) > 1e-10:
+                    self._require_position_review("risk-exit-hedge-incomplete", {
+                        "requested": confirmed, "filled": fill, "venue": v.key})
+                    return
+
     async def _position_risk_loop(self):
         while not self.stop.is_set():
             try:
                 self.position_risk_snapshot = await self.entropy.fetch_position_risk()
                 self.position_risk_error = None
                 log.info("[POSITION RISK] %s", self.position_risk_snapshot)
+                self._consider_position_risk_exit()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

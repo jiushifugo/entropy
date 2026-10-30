@@ -1,10 +1,10 @@
-# Position-risk phase 1 / 逐仓风险第一阶段
+# Position risk / 逐仓风险保护
 
-This is telemetry and an experimental opt-in entry gate, **not complete
-liquidation prevention**. Automatic early exits are NOT implemented or enabled.
+This is telemetry, an experimental opt-in entry gate and opt-in early exit,
+**not complete liquidation prevention**. Automatic early exits default OFF.
 Do not restart live trading on the assumption that this fixes liquidation risk.
 
-第一阶段不自动平仓、加保证金、改杠杆，也不解除人工核验锁。
+默认仅监测，不自动平仓、加保证金、改杠杆，也不解除人工核验锁。
 服务器配置不自动更新。不要只为启用监测而清除强平锁恢复实盘。
 
 ## Standalone read-only verification / 独立只读验证
@@ -48,6 +48,8 @@ Configuration under `risk` (defaults, no threshold recommendation):
 position_risk_guard_enabled: false
 position_risk_min_distance_pct: 0.0
 position_risk_max_age_sec: 15.0
+position_risk_exit_enabled: false
+position_risk_exit_distance_pct: 0.0
 ```
 
 With the guard OFF the strategy's admission logic is unchanged; only read-only
@@ -64,11 +66,46 @@ This gate does not force liquidation-risk reduction, reserve margin for an
 addition, or guarantee a safe resulting liquidation price. Price gaps, funding,
 API outages, and execution failures can still result in liquidation.
 
-Before a later automatic-exit phase: verify real snapshots without opening test
-positions, choose warning/block/exit thresholds with the operator, validate
-both venues' reduce-only paths, and test partial/unknown outcomes, dust,
-stale data, concurrent executions and manual-review escalation. Keep the
-current liquidation lock and server stopped while this remains unverified.
+## Opt-in early exit / 可选提前退出
+
+Activation requires the entry guard enabled and operator-chosen thresholds
+`0 < position_risk_exit_distance_pct < position_risk_min_distance_pct`.
+Zero values are deliberately not usable activation defaults. No suggested
+thresholds are implied by tests. Existing liquidation locks must not be cleared
+merely to try this feature. Keep the server stopped during verification.
+
+Fresh isolated-position telemetry at/below the exit distance latches strategy
+halt only when it matches settled local inventory and no order/venue lock is
+pending. A persistent `.position-review.risk-exit` marker is written before any
+exit sends. Persistence failure escalates to manual review. Restart with this
+marker also requires manual review; neither a new day nor flat positions resumes
+strategy. It is separate from the normal position-review marker: archive BOTH
+only after manual verification, never blindly delete safety markers.
+
+The exit loop uses two agreeing reads of BOTH accounts, fresh books, both
+routes' readiness, and each venue's actual minimums, then sends bounded IOC
+reduce-only orders. It requires opposite, equal-sized inventory; unpaired or
+changed inventory escalates to manual review rather than automatically adopting
+account values. Entropy closes first, and the hedge closes only the confirmed
+Entropy fill (not the original requested quantity). Known zero first-leg fill
+does not send the hedge. An unknown outcome, insufficient partial hedge size,
+incomplete hedge, or dust escalates to manual review and stops further automatic
+sends. An unavailable venue/account read sends nothing that round and logs an
+urgent warning; repeated rounds do not guarantee timely execution.
+
+The risk exit is independent of `flatten_on_execution_halt`, remains latched
+after flattening, and never overrides liquidation/unknown-order review locks.
+Orders are sequential, not atomic. The strategy stays halted even if price
+recovers. Once latched, fresh account/route verification permits continued exit
+without requiring the dangerous-distance reading to persist. Telemetry poll
+interval plus request latency, reconciliation grace, the two-read delay and
+10s exit-loop cadence all add delay. Price gaps, rate limits, trading bounds,
+API faults and sequential fills can still leave exposure or cause liquidation.
+
+This does not calculate post-entry liquidation prices or allocate isolated
+collateral. Opening from flat remains blocked with the entry guard enabled.
+Live/nonflat telemetry and operator thresholds remain unverified on the server;
+offline tests do not prove live exit reliability. Do not open test positions.
 
 API references:
 - https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint

@@ -84,6 +84,10 @@ risk:
   position_risk_guard_enabled: false
   position_risk_min_distance_pct: 0.0 # no threshold chosen; must be >0 to enable
   position_risk_max_age_sec: 15.0
+  # Phase 2 is opt-in. Operator must choose 0 < exit distance < entry distance.
+  # 自动提前退出默认关闭；必须人工确认阈值，不能直接使用0。
+  position_risk_exit_enabled: false
+  position_risk_exit_distance_pct: 0.0
   daily_loss_limit_usd: 0.80
   # halt = reduce-only then halt flat; profit_only = keep running, but after
   # the loss limit only admit strategy trades whose budgeted net edge clears
