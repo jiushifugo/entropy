@@ -31,7 +31,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
 from .volume_stats import VolumeStats
-from .position_risk import entry_block_reason
+from .position_risk import entry_block_reason, project_entry
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 from .venue_arcus import ArcusVenue
@@ -670,7 +670,7 @@ class Engine:
             return "no_edge"
         if plan is None:
             return "depth"
-        if self._position_risk_block(buy.key == "entropy", plan.qty):
+        if self._position_risk_plan_block(buy, sell, plan):
             return "risk"
         net = self._budgeted_net_bps(buy, sell, plan)
         if self.profit_only and net + 1e-9 < cfg.profit_only_min_bps:
@@ -791,7 +791,7 @@ class Engine:
                 continue
             if plan is None:
                 continue
-            if self._position_risk_block(buy.key == "entropy", plan.qty):
+            if self._position_risk_plan_block(buy, sell, plan):
                 continue
             if not self._profit_only_plan_ok(dkey, buy, sell, plan):
                 continue
@@ -893,13 +893,13 @@ class Engine:
         return net_usd / notional * 1e4
 
     def _entropy_resting_edge_ok(self, *, entropy_is_buy: bool, entropy,
-                                 hedge, entropy_limit: float) -> bool:
+                                 hedge, entropy_limit: float, entropy_qty=0.0) -> bool:
         return self._entropy_resting_block_reason(
             entropy_is_buy=entropy_is_buy, entropy=entropy, hedge=hedge,
-            entropy_limit=entropy_limit) is None
+            entropy_limit=entropy_limit, entropy_qty=entropy_qty) is None
 
     def _entropy_resting_block_reason(self, *, entropy_is_buy: bool, entropy,
-                                      hedge, entropy_limit: float):
+                                      hedge, entropy_limit: float, entropy_qty=0.0):
         """Whether a resting Entropy fill is still safe to hedge now.
 
         The Entropy price is fixed by the live order.  Revalue only the RH leg
@@ -913,7 +913,7 @@ class Engine:
             return "shutdown"
         if self.halted or self.risk_limited:
             return "risk"
-        if self._position_risk_block(entropy_is_buy, 0.0):
+        if self._position_risk_block(entropy_is_buy, entropy_qty, entropy_limit):
             return "position-risk"
         if entropy.key in self._venue_down or hedge.key in self._venue_down:
             return "venue-down"
@@ -950,7 +950,7 @@ class Engine:
         must escalate to reconcile."""
         if self.halted:
             return False
-        block = self._position_risk_block(buy.key == "entropy", plan.qty)
+        block = self._position_risk_plan_block(buy, sell, plan)
         if block:
             self._skiplog("strategy paused: %s", block)
             return False
@@ -1019,10 +1019,10 @@ class Engine:
                     ttl_sec=cfg.entropy_resting_ttl_sec,
                     keep_open=lambda: self._entropy_resting_edge_ok(
                         entropy_is_buy=entropy_is_buy, entropy=entropy,
-                        hedge=hedge, entropy_limit=entropy_bound),
+                        hedge=hedge, entropy_limit=entropy_bound, entropy_qty=plan.qty),
                     cancel_diagnostic=lambda: self._entropy_resting_block_reason(
                         entropy_is_buy=entropy_is_buy, entropy=entropy,
-                        hedge=hedge, entropy_limit=entropy_bound),
+                        hedge=hedge, entropy_limit=entropy_bound, entropy_qty=plan.qty),
                 )
             except Exception as exc:
                 entropy_info = failed_info(repr(exc), "send-failed")
@@ -1088,7 +1088,10 @@ class Engine:
                             direction, ref_px or retry_plan.buy_limit):
                         retry_floor_bps = max(
                             retry_floor_bps, cfg.dust_flip_min_net_bps)
-                    if retry_net_bps + 1e-9 < retry_floor_bps:
+                    retry_risk = self._position_risk_plan_block(buy, sell, retry_plan)
+                    if retry_risk:
+                        log.warning("[ENTROPY RETRY] skipped: %s", retry_risk)
+                    elif retry_net_bps + 1e-9 < retry_floor_bps:
                         log.info("[ENTROPY RETRY] %s skipped: budgeted net "
                                  "%.2fbps < %.2fbps", direction,
                                  retry_net_bps, retry_floor_bps)
@@ -1741,14 +1744,39 @@ class Engine:
             except Exception:
                 log.exception("reconcile failed")
 
-    def _position_risk_block(self, is_buy, qty):
+    def _position_risk_plan_block(self, buy, sell, plan):
+        if not self.cfg.position_risk_guard_enabled:
+            return None
+        is_buy = buy.key == "entropy"
+        if not getattr(self, "position_risk_snapshot", None) or getattr(self, "position_risk_error", None):
+            return self._position_risk_block(is_buy, plan.qty)
+        slip = max(self.cfg.entropy_max_slippage_bps, self.cfg.entropy_leg_slippage_bps,
+                   self.cfg.leg_slippage_bps) / 1e4
+        worst = plan.buy_limit * (1 + slip) if is_buy else plan.sell_limit * (1 - slip)
+        return self._position_risk_block(is_buy, plan.qty, worst)
+
+    def _position_risk_block(self, is_buy, qty, worst_price=None):
         if not getattr(self.cfg, "position_risk_guard_enabled", False):
             return None
-        return entry_block_reason(
-            getattr(self, "position_risk_snapshot", None),
+        snapshot = getattr(self, "position_risk_snapshot", None)
+        reason = entry_block_reason(
+            snapshot,
             getattr(self, "position_risk_error", None), self.entropy.position,
             is_buy, qty, self.cfg.position_risk_min_distance_pct,
             self.cfg.position_risk_max_age_sec)
+        if reason and reason != "position-risk-flat-unverified":
+            return reason
+        delta = qty if is_buy else -qty
+        if self.entropy.position * delta < 0 and qty <= abs(self.entropy.position) + 1e-10:
+            return None  # verified pure reduction, never a flip
+        if qty <= 0:
+            return reason
+        projection = project_entry(snapshot, snapshot.get("entry"), is_buy, qty,
+                                   worst_price, self.entropy.fee_bps,
+                                   self.cfg.position_risk_min_distance_pct,
+                                   self.cfg.position_risk_max_age_sec)
+        self.position_risk_projection = projection
+        return projection["reason"]
 
     def _consider_position_risk_exit(self):
         """Latch only on fresh, identity-checked data matching settled inventory."""
@@ -1892,7 +1920,8 @@ class Engine:
     async def _position_risk_loop(self):
         while not self.stop.is_set():
             try:
-                self.position_risk_snapshot = await self.entropy.fetch_position_risk()
+                self.position_risk_snapshot = await self.entropy.fetch_position_risk(
+                    include_entry=self.cfg.position_risk_guard_enabled)
                 self.position_risk_error = None
                 log.info("[POSITION RISK] %s", self.position_risk_snapshot)
                 self._consider_position_risk_exit()

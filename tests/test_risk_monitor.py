@@ -68,3 +68,42 @@ def test_monitor_rejects_invalid_inputs(extra):
 def test_monitor_cannot_send_order_requests():
     with pytest.raises(ValueError, match="read-only"):
         monitor.query({"type": "order"})
+
+
+def test_preflight_collects_only_three_public_info_types():
+    from test_entry_projection import inputs
+    active, meta, _ = inputs()
+    active["user"] = ACCOUNT
+    calls = []
+    def request(payload):
+        calls.append(payload)
+        return {"clearinghouseState": {"time": time.time() * 1000, "assetPositions": []},
+                "metaAndAssetCtxs": [meta, [{"markPx": "100"}]], "activeAssetData": active}[payload["type"]]
+    result = monitor.collect(ACCOUNT, "io:SNDK", "io", request, include_entry=True)
+    assert result["entry"]["leverage"] == 15
+    assert result["status"] == "FLAT"
+    assert [p["type"] for p in calls] == ["clearinghouseState", "metaAndAssetCtxs", "activeAssetData"]
+
+
+def test_preflight_missing_inputs_cannot_start():
+    with pytest.raises(SystemExit):
+        monitor.main(["--account", ACCOUNT, "--preflight", "--once"])
+
+
+def test_preflight_prints_both_estimates_without_orders(monkeypatch, capsys):
+    from test_entry_projection import evidence
+    snapshot, entry = evidence()
+    snapshot.update(status="FLAT", entry=entry)
+    monkeypatch.setattr(monitor, "collect", lambda *args, **kwargs: snapshot)
+    assert monitor.main(["--account", ACCOUNT, "--once", "--preflight", "--quantity", ".04",
+                         "--fee-bps", ".9", "--slippage-bps", "4", "--min-distance-pct", "3"]) == 0
+    output = capsys.readouterr().out
+    assert "hypothetical_preflight" in output and '"buy"' in output and '"sell"' in output
+
+
+def test_preflight_missing_entry_evidence_nonzero_exit(monkeypatch, capsys):
+    monkeypatch.setattr(monitor, "collect", lambda *args, **kwargs: {
+        "status": "FLAT", "position": 0, "observed_at": time.time(), "entry_error": "offline"})
+    assert monitor.main(["--account", ACCOUNT, "--once", "--preflight", "--quantity", ".04",
+                         "--fee-bps", ".9", "--slippage-bps", "4", "--min-distance-pct", "3"]) == 1
+    assert "position-risk-entry-unavailable" in capsys.readouterr().out

@@ -18,12 +18,26 @@ python3 tools/monitor_position_risk.py --account 0xYOUR_PUBLIC_ACCOUNT --once
 python3 tools/monitor_position_risk.py --account 0xYOUR_PUBLIC_ACCOUNT
 ```
 
-This independent entry point uses only two public `/info` request types. It
+This independent entry point uses only allowlisted public `/info` request types. It
 does not instantiate Engine, load `.env`, initialize signers, subscribe to
 orders, write logs/config/state/locks, or send exchange requests. An error
-prints UNKNOWN; `--once` returns nonzero. FLAT does not validate hypothetical
+prints UNKNOWN; `--once` returns nonzero. FLAT alone does not validate hypothetical
 margin. Do not open a position just to obtain telemetry. This checks Entropy
 risk only, not Arcus positions or pending orders.
+
+An optional hypothetical preflight also reads `activeAssetData` for selected
+isolated leverage, directional size limits and available margin. Example
+numbers below are inputs for a READ-ONLY calculation, not an order request:
+
+```bash
+python3 tools/monitor_position_risk.py --account 0xYOUR_PUBLIC_ACCOUNT --once \
+  --preflight --quantity 0.04 --fee-bps 0.9 --slippage-bps 4 --min-distance-pct 3
+```
+
+It evaluates hypothetical buy/sell limits around the queried MARK, not the
+actual executable book. A `reason: null` is only a model pass, not permission
+to resume live trading. A non-null reason means blocked/unmodeled; missing
+entry evidence yields nonzero exit in once mode. No hypothetical orders are sent.
 
 Live mode polls Entropy account state every 5 seconds (plus request time).
 Record-only mode does not query account risk. The adapter uses its configured
@@ -57,8 +71,8 @@ telemetry requests and UI/log output are added. With it ON, the distance must
 be explicitly positive. Missing/stale/position-mismatched risk data blocks
 strategy orders. Valid position-reducing orders are permitted without flipping
 through zero; additions at/below the chosen distance are blocked. Cross-margin
-additions and opening from flat are blocked because there is no cross/hypothetical
-margin model in this phase. A successful fill invalidates the old position
+entries and position flips remain unmodeled/blocked. Flat entries and additions
+also require the single-tier projection described below. A successful fill invalidates the old position
 snapshot until refreshed. Emergency hedges and existing halt exits are not
 disabled by this gate; manual review locks still take precedence.
 
@@ -109,11 +123,42 @@ interval plus request latency, reconciliation grace, the two-read delay and
 10s exit-loop cadence all add delay. Price gaps, rate limits, trading bounds,
 API faults and sequential fills can still leave exposure or cause liquidation.
 
-This does not calculate post-entry liquidation prices or allocate isolated
-collateral. Opening from flat remains blocked with the entry guard enabled.
-Live/nonflat telemetry and operator thresholds remain unverified on the server;
-offline tests do not prove live exit reliability. Do not open test positions.
+## Entry projection / 开仓与加仓预估
+
+No leverage or collateral mutation is performed. Selected account leverage,
+market identity, USDC collateral, mark price, directional maximum size and
+available margin must validate. Only single-tier markets are supported. A
+missing table is not guessed, EXCEPT the official built-in IDs less than 50
+(one tier, max leverage equals ID). Explicit multi-tier tables are blocked.
+
+Before a first order, pending GTC continuation and an IOC retry, the enabled
+guard checks projected distance strictly greater than the entry threshold.
+Strategy scans use the maximum configured Entropy crossing allowance, not a
+favorable top price. Pure reductions are allowed from valid matching position
+data; crossing zero is blocked. Disabled guard leaves strategy admission
+unchanged and does not request active-asset entry evidence.
+
+For flat inventory, collateral credit is limited to the smaller of mark/limit
+notional divided by selected leverage. Nonzero unexplained flat rawUsd is
+blocked. For additions, equity is reconstructed from the reported liquidation
+price and single-tier maintenance rate; NO new collateral credit is assumed.
+Adverse entry-vs-mark PnL, entry fees and an exit-fee reserve are subtracted.
+Favorable PnL is not credited. Projected liquidation is solved from equity at
+mark and maintenance rate, then compared with the configured distance. Capacity
+checks also require enough directional available margin and maximum trade size.
+
+This is intentionally conservative and can block trades that the venue would
+accept (especially additions). Mark/account reads are not atomic; the model
+does not guarantee allocation, future funding, liquidation behavior, execution
+price after API delay or successful exits. A model pass is NOT a live safety
+certificate. Snapshot freshness checks and post-fill monitoring still apply.
+Unknown fields, stale data, leverage changes or unsupported tiers fail closed.
+Server preflight/model verification and live/nonflat telemetry remain unverified;
+offline tests do not prove live exit reliability. Keep the liquidation lock
+and server stopped. Do not open test positions.
 
 API references:
 - https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
 - https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations
+- https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers
+- https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals

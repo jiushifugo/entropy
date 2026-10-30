@@ -33,7 +33,7 @@ except ImportError:
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import HLBookFeed
-from .position_risk import parse_position_risk
+from .position_risk import parse_position_risk, parse_entry_evidence
 
 log = logging.getLogger("hl")
 
@@ -966,11 +966,12 @@ class HLVenue:
             fr += float(st.get("withdrawable") or 0.0)
         return eq, fr
 
-    async def fetch_position_risk(self):
+    async def fetch_position_risk(self, include_entry=False):
         """Never uses book mid as a substitute for the liquidation mark."""
         addr = self._query_address()
         if addr is None:
             raise ValueError("account identity unavailable")
+        started = time.time()
         state = await self._info({"type": "clearinghouseState", "user": addr,
                                   "dex": self.conf.hl_dex})
         # Flat accounts don't need a second request, but still require a valid
@@ -978,9 +979,16 @@ class HLVenue:
         has_position = any((row.get("position") or {}).get("coin") == self.coin
                            for row in state.get("assetPositions", []))
         contexts = None
-        if has_position:
+        if has_position or include_entry:
             contexts = await self._info({"type": "metaAndAssetCtxs", "dex": self.conf.hl_dex})
-        return parse_position_risk(state, self.coin, contexts)
+        result = parse_position_risk(state, self.coin, contexts)
+        if include_entry:
+            try:
+                active = await self._info({"type": "activeAssetData", "user": addr, "coin": self.coin})
+                result["entry"] = parse_entry_evidence(active, contexts[0], addr, self.coin, started)
+            except Exception as exc:
+                result["entry_error"] = str(exc)
+        return result
 
     async def fetch_position(self) -> float:
         addr = self._query_address()

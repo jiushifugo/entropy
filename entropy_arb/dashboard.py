@@ -360,6 +360,12 @@ class Dashboard:
                   Text("ON" if getattr(cfg, "position_risk_guard_enabled", False) else "OFF (observe only)"))
         g.add_row("position risk auto exit",
                   Text("ON" if getattr(cfg, "position_risk_exit_enabled", False) else "OFF"))
+        projection = getattr(eng, "position_risk_projection", None)
+        if getattr(cfg, "position_risk_guard_enabled", False) and projection:
+            estimated = projection.get("estimated_distance_pct")
+            label = "开仓预估（非保证）" if self.lang == "zh" else "Entry estimate (not guaranteed)"
+            g.add_row(label, Text((f"{estimated:.3f}% | " if estimated is not None else "")
+                                  + str(projection.get("reason") or "model pass"), style="yellow"))
         if eng._position_review_required:
             g.add_row("持仓需人工核验" if self.lang == "zh" else "Position review",
                       Text(str(eng._position_review_reason), style="bold red"))

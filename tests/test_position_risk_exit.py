@@ -220,7 +220,7 @@ def test_equal_thresholds_load_and_trigger_together(tmp_path, distance):
     eng.cfg.position_risk_min_distance_pct = cfg.position_risk_min_distance_pct
     eng.cfg.position_risk_exit_distance_pct = cfg.position_risk_exit_distance_pct
     eng.position_risk_snapshot["distance_pct"] = distance + .01
-    assert eng._position_risk_block(True, .1) is None
+    assert eng._position_risk_block(True, .1) == "position-risk-entry-unavailable"
     eng._consider_position_risk_exit()
     assert not eng._position_risk_exit_active
     eng.position_risk_snapshot["distance_pct"] = distance
