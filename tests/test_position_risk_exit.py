@@ -206,8 +206,24 @@ def test_partial_below_hedge_minimum_escalates(tmp_path):
 
 def test_cannot_activate_with_unset_thresholds_or_without_guard():
     for text in ["position_risk_exit_enabled: true", "position_risk_exit_distance_pct: .nan",
-                 "position_risk_guard_enabled: true\n  position_risk_min_distance_pct: 3\n  position_risk_exit_enabled: true\n  position_risk_exit_distance_pct: 3"]:
+                 "position_risk_guard_enabled: true\n  position_risk_min_distance_pct: 3\n  position_risk_exit_enabled: true\n  position_risk_exit_distance_pct: 4"]:
         with pytest.raises(ConfigError):
             load(MINIMAL + "\nrisk:\n  " + text + "\n")
     cfg = load(MINIMAL + "\nrisk:\n  position_risk_guard_enabled: true\n  position_risk_min_distance_pct: 5\n  position_risk_exit_enabled: true\n  position_risk_exit_distance_pct: 2\n")
     assert cfg.position_risk_exit_enabled
+
+
+def test_equal_five_percent_thresholds_load_and_trigger_together(tmp_path):
+    cfg = load(MINIMAL + "\nrisk:\n  position_risk_guard_enabled: true\n  position_risk_min_distance_pct: 5\n  position_risk_exit_enabled: true\n  position_risk_exit_distance_pct: 5\n")
+    eng, calls = prepared(tmp_path)
+    eng.cfg.position_risk_min_distance_pct = cfg.position_risk_min_distance_pct
+    eng.cfg.position_risk_exit_distance_pct = cfg.position_risk_exit_distance_pct
+    eng.position_risk_snapshot["distance_pct"] = 5.01
+    assert eng._position_risk_block(True, .1) is None
+    eng._consider_position_risk_exit()
+    assert not eng._position_risk_exit_active
+    eng.position_risk_snapshot["distance_pct"] = 5.0
+    assert eng._position_risk_block(True, .1) == "position-risk-distance"
+    eng._consider_position_risk_exit()
+    assert eng._position_risk_exit_active and eng.halted
+    assert not calls

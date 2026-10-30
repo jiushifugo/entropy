@@ -455,8 +455,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     risk_exit_distance = float(_get(raw, "risk", "position_risk_exit_distance_pct", 0.0))
     if not math.isfinite(risk_exit_distance) or not 0 <= risk_exit_distance < 100:
         raise ConfigError("risk.position_risk_exit_distance_pct must be in [0, 100)")
-    if risk_exit_enabled and (not guard_enabled or not 0 < risk_exit_distance < guard_distance):
-        raise ConfigError("risk exit requires entry guard and 0 < exit distance < entry distance")
+    if risk_exit_enabled and (not guard_enabled or not 0 < risk_exit_distance <= guard_distance):
+        raise ConfigError("risk exit requires entry guard and 0 < exit distance <= entry distance")
     daily_loss_action = daily_loss_action.replace("-", "_")
     if daily_loss_action not in ("halt", "profit_only"):
         raise ConfigError("risk.daily_loss_action must be 'halt' or "

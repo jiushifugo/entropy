@@ -69,10 +69,17 @@ API outages, and execution failures can still result in liquidation.
 ## Opt-in early exit / 可选提前退出
 
 Activation requires the entry guard enabled and operator-chosen thresholds
-`0 < position_risk_exit_distance_pct < position_risk_min_distance_pct`.
+`0 < position_risk_exit_distance_pct <= position_risk_min_distance_pct`.
 Zero values are deliberately not usable activation defaults. No suggested
 thresholds are implied by tests. Existing liquidation locks must not be cleared
 merely to try this feature. Keep the server stopped during verification.
+
+Operator-selected configuration in the example file is 5% for BOTH distances,
+with BOTH switches still OFF. At distance <=5%, additions are blocked and the
+exit latch triggers together; there is no separate warning/entry-block buffer
+before exit. These are distances from the current mark to the liquidation price,
+NOT 5% account loss, 5% loss from entry, or a guarantee that liquidation can be
+avoided. Omitted YAML values still default to zero (no threshold configured).
 
 Fresh isolated-position telemetry at/below the exit distance latches strategy
 halt only when it matches settled local inventory and no order/venue lock is

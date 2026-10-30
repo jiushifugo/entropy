@@ -82,12 +82,12 @@ risk:
   # Phase 1: telemetry + opt-in entry gate only, NOT automatic liquidation exit.
   # 第一阶段仅监测及可选加仓拦截，不会自动平仓/充值/改杠杆。
   position_risk_guard_enabled: false
-  position_risk_min_distance_pct: 0.0 # no threshold chosen; must be >0 to enable
+  position_risk_min_distance_pct: 5.0 # operator-selected distance, NOT a safety guarantee
   position_risk_max_age_sec: 15.0
-  # Phase 2 is opt-in. Operator must choose 0 < exit distance < entry distance.
-  # 自动提前退出默认关闭；必须人工确认阈值，不能直接使用0。
+  # Phase 2 is opt-in. Must have 0 < exit distance <= entry distance.
+  # 同为5%表示同时禁加仓与触发退出，无单独预警缓冲；两个开关仍关闭。
   position_risk_exit_enabled: false
-  position_risk_exit_distance_pct: 0.0
+  position_risk_exit_distance_pct: 5.0
   daily_loss_limit_usd: 0.80
   # halt = reduce-only then halt flat; profit_only = keep running, but after
   # the loss limit only admit strategy trades whose budgeted net edge clears
