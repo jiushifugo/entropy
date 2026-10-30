@@ -7,6 +7,24 @@ Do not restart live trading on the assumption that this fixes liquidation risk.
 第一阶段不自动平仓、加保证金、改杠杆，也不解除人工核验锁。
 服务器配置不自动更新。不要只为启用监测而清除强平锁恢复实盘。
 
+## Standalone read-only verification / 独立只读验证
+
+Keep the live engine stopped and the position-review lock intact. Use the
+public trading-account address, NOT the agent signer or private key:
+
+```bash
+python3 tools/monitor_position_risk.py --account 0xYOUR_PUBLIC_ACCOUNT --once
+# Continuous stdout only, Ctrl+C to stop (15s interval):
+python3 tools/monitor_position_risk.py --account 0xYOUR_PUBLIC_ACCOUNT
+```
+
+This independent entry point uses only two public `/info` request types. It
+does not instantiate Engine, load `.env`, initialize signers, subscribe to
+orders, write logs/config/state/locks, or send exchange requests. An error
+prints UNKNOWN; `--once` returns nonzero. FLAT does not validate hypothetical
+margin. Do not open a position just to obtain telemetry. This checks Entropy
+risk only, not Arcus positions or pending orders.
+
 Live mode polls Entropy account state every 5 seconds (plus request time).
 Record-only mode does not query account risk. The adapter uses its configured
 query account and HIP-3 dex, `clearinghouseState` position fields, and
