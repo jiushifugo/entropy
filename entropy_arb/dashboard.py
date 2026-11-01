@@ -335,6 +335,7 @@ class Dashboard:
                 "RISK-EXIT" if getattr(eng, "_position_risk_exit_active", False) else
                 "HALTED-EXIT" if eng._execution_halted and cfg.flatten_on_execution_halt else
                 "HALTED" if eng.halted else
+                "DUST-VERIFY" if getattr(eng, "_dust_verification_pending", False) else
                 "CLOSE-ONLY" if eng.risk_limited else
                 "PROFIT-ONLY" if eng.profit_only else "NORMAL")
         dust = getattr(eng, "_paired_dust", None)
@@ -346,6 +347,9 @@ class Dashboard:
         if mode == "PAIRED-DUST":
             g.add_row("已配对尾仓（非空仓）" if self.lang == "zh" else "Paired dust (NOT flat)",
                       Text(str(dust["positions"]), style="yellow"))
+        if mode == "DUST-VERIFY":
+            g.add_row("尾仓核验中" if self.lang == "zh" else "Dust verification",
+                      Text("策略暂停 / strategy paused", style="yellow"))
         snapshot = getattr(eng, "position_risk_snapshot", None)
         risk_error = getattr(eng, "position_risk_error", None)
         risk_label = "Entropy逐仓风险" if self.lang == "zh" else "Entropy margin risk"

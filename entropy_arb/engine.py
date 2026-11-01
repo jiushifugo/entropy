@@ -117,6 +117,8 @@ class Engine:
         self._execution_halted = False
         self._position_risk_exit_active = False
         self._paired_dust = None
+        self._dust_verification_pending = False
+        self._dust_verification_since = None
 
     # ------------------------------------------------------------- utilities
 
@@ -644,6 +646,8 @@ class Engine:
     def _volume_reason(self, now, buy, sell, dkey):
         """Read-only first blocking gate, sampled independently of book updates."""
         cfg = self.cfg
+        if self._dust_verification_pending:
+            return "risk"
         if self.halted:
             return "risk"
         if self.risk_limited and all(abs(v.position) <= cfg.net_tolerance_base for v in (buy, sell)):
@@ -736,6 +740,8 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        if self._dust_verification_pending:
+            return None
         repair = self._residual_repair_plan()
         if repair is not None:
             return repair
@@ -1757,6 +1763,8 @@ class Engine:
         return self._position_risk_block(is_buy, plan.qty, worst)
 
     def _position_risk_block(self, is_buy, qty, worst_price=None):
+        if self._dust_verification_pending:
+            return "paired-dust-verification-pending"
         if not getattr(self.cfg, "position_risk_guard_enabled", False):
             return None
         snapshot = getattr(self, "position_risk_snapshot", None)
@@ -1797,6 +1805,11 @@ class Engine:
                 or abs(snapshot["position"] - self.entropy.position) > 1e-10
                 or snapshot["distance_pct"] > self.cfg.position_risk_exit_distance_pct):
             return
+        if self._dust_verification_pending and self._paired_dust_candidate(allow_unready=True):
+            if (self._dust_verification_since is None or time.monotonic() - self._dust_verification_since
+                    >= self.cfg.position_risk_max_age_sec):
+                self._require_position_review("paired-dust-verification-timeout", {})
+            return  # strategy is paused; bounded verification, not an exemption
         dust = self._paired_dust
         if (dust and 0 <= now - dust["verified_at"] <= self.cfg.position_risk_max_age_sec
                 and all(abs(v.position - dust["positions"][v.key]) <= 1e-10 for v in self.venues.values())
@@ -1923,7 +1936,7 @@ class Engine:
                         "requested": confirmed, "filled": fill, "venue": v.key})
                     return
 
-    def _paired_dust_candidate(self):
+    def _paired_dust_candidate(self, allow_unready=False):
         cap = self.cfg.position_risk_paired_dust_max_usd
         venues = [self.entropy, self.hedge]
         if (cap <= 0 or self._position_review_required or self._execution_halted
@@ -1937,8 +1950,18 @@ class Engine:
             return False
         for v in venues:
             if v.key in self._venue_down or not v.book.is_fresh(self.cfg.staleness_sec):
-                return False
-            bid, ask = v.book.best_bid(), v.book.best_ask()
+                if not allow_unready:
+                    return False
+                snapshot = getattr(self, "position_risk_snapshot", None)
+                if (not snapshot or getattr(self, "position_risk_error", None)
+                        or not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec
+                        or abs(snapshot["position"] - self.entropy.position) > 1e-10):
+                    return False
+                # Same-symbol mark is ONLY a bounded waiting candidate, never
+                # proof of the hedge's executable price or a trading approval.
+                bid = ask = snapshot.get("mark_px")
+            else:
+                bid, ask = v.book.best_bid(), v.book.best_ask()
             if (not bid or not ask or not all(math.isfinite(p) and p > 0 for p in (bid, ask))
                     or bid > ask):
                 return False
@@ -1952,12 +1975,23 @@ class Engine:
     async def _refresh_paired_dust(self):
         previous = self._paired_dust
         self._paired_dust = None  # errors/stale reads never retain an exemption
-        if not self._paired_dust_candidate():
+        self._dust_verification_pending = False
+        if not self._paired_dust_candidate(allow_unready=True):
+            self._dust_verification_since = None
             return
         snapshot = getattr(self, "position_risk_snapshot", None)
         if (not snapshot or getattr(self, "position_risk_error", None)
                 or not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec
                 or abs(snapshot["position"] - self.entropy.position) > 1e-10):
+            return
+        self._dust_verification_pending = True
+        if self._dust_verification_since is None:
+            self._dust_verification_since = time.monotonic()
+            log.warning("[PAIRED DUST] verification pending; strategy paused until books and both accounts verify")
+        if time.monotonic() - self._dust_verification_since >= self.cfg.position_risk_max_age_sec:
+            self._require_position_review("paired-dust-verification-timeout", {})
+            return
+        if not self._paired_dust_candidate():
             return
         venues = [self.entropy, self.hedge]
         if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
@@ -1981,8 +2015,13 @@ class Engine:
                     await asyncio.sleep(1)
             if not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec:
                 return
+            if time.monotonic() - self._dust_verification_since >= self.cfg.position_risk_max_age_sec:
+                self._require_position_review("paired-dust-verification-timeout", {})
+                return
             self._paired_dust = {"verified_at": time.time(),
                                  "positions": {v.key: v.position for v in venues}}
+            self._dust_verification_pending = False
+            self._dust_verification_since = None
             if not previous or previous["positions"] != self._paired_dust["positions"]:
                 log.warning("[PAIRED DUST] verified opposite equal untradeable residuals %s; "
                             "observe only, NOT flat; entry guard and liquidation locks remain active",
@@ -2001,6 +2040,7 @@ class Engine:
                 raise
             except Exception as exc:
                 self._paired_dust = None
+                self._dust_verification_pending = False
                 self.position_risk_error = str(exc)
                 log.warning("[POSITION RISK] unavailable: %s", exc)
             self._update_evt.set()

@@ -14,6 +14,7 @@ def dust_engine(tmp_path):
     eng.cfg.position_risk_paired_dust_max_usd = .2
     eng.entropy.position, eng.hedge.position = -.0001, .0001
     eng.position_risk_snapshot.update(position=-.0001, distance_pct=1, observed_at=time.time())
+    eng.position_risk_snapshot["mark_px"] = 100
     return eng, calls
 
 
@@ -78,7 +79,10 @@ def test_fetch_failure_never_leaves_cached_exemption(tmp_path):
         await eng._refresh_paired_dust()
         assert eng._paired_dust is None
         eng._consider_position_risk_exit()
-        assert eng._position_risk_exit_active
+        assert eng._dust_verification_pending and not eng._position_risk_exit_active
+        eng._dust_verification_since -= 60
+        await eng._refresh_paired_dust()
+        assert eng._position_review_reason == "paired-dust-verification-timeout"
     asyncio.run(go())
 
 
@@ -109,3 +113,61 @@ def test_paired_dust_config_default_off_and_rejects_invalid_cap():
     for cap in ("-1", ".nan", ".inf"):
         with pytest.raises(ConfigError):
             load(MINIMAL + "\nrisk:\n  position_risk_paired_dust_max_usd: " + cap + "\n")
+
+
+def test_startup_unready_book_waits_then_verifies_without_exit_marker(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng.hedge.book.ready = False
+        await eng._refresh_paired_dust()
+        eng._consider_position_risk_exit()
+        assert eng._dust_verification_pending
+        assert not eng._position_risk_exit_active and not eng._position_review_required
+        assert eng._scan(time.time()) is None
+        assert eng._position_risk_block(True, .1, 100) == "paired-dust-verification-pending"
+        assert not Path(eng._position_review_path() + ".risk-exit").exists()
+        eng.hedge.set_book(100, 100.1)
+        await eng._refresh_paired_dust()
+        eng._consider_position_risk_exit()
+        assert not eng._dust_verification_pending and eng._paired_dust
+        assert not eng.halted and not calls
+    asyncio.run(go())
+
+
+def test_unready_tiny_candidate_timeout_is_manual_not_blind_exit(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng.hedge.book.ready = False
+        await eng._refresh_paired_dust()
+        eng._dust_verification_since -= 60
+        eng._consider_position_risk_exit()
+        assert eng._position_review_reason == "paired-dust-verification-timeout"
+        assert not eng._position_risk_exit_active and not calls
+    asyncio.run(go())
+
+
+def test_large_inventory_is_not_deferred_while_book_unready(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng.entropy.position, eng.hedge.position = -.2, .2
+        eng.position_risk_snapshot["position"] = -.2
+        eng.hedge.book.ready = False
+        await eng._refresh_paired_dust()
+        eng._consider_position_risk_exit()
+        assert not eng._dust_verification_pending and eng._position_risk_exit_active
+        assert not calls
+    asyncio.run(go())
+
+
+def test_old_incident_lock_is_not_cleared_by_startup_wait(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng._require_position_review("risk-exit-dust", {})
+        before = Path(eng._position_review_path()).read_text()
+        eng.hedge.book.ready = False
+        await eng._refresh_paired_dust()
+        eng._consider_position_risk_exit()
+        assert eng._position_review_required and eng.halted
+        assert Path(eng._position_review_path()).read_text() == before
+        assert not calls
+    asyncio.run(go())

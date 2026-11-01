@@ -194,3 +194,16 @@ An exit already latched for a larger position stays latched even if only dust
 remains; its manual-review rules are unchanged. Operator account/open-order
 verification is still required before any manual archival/restart. Do not add
 positions just to meet minimum order size or disable the main risk guards.
+
+Startup/revalidation ordering: bounded equal/opposite residual candidates enter
+DUST-VERIFY before any asynchronous account verification. The strategy is paused
+(including scans, repairs and retries) while waiting for BOTH fresh books and
+two account reads. When a book is not ready, the same-symbol Entropy mark is used
+ONLY to identify a possible tiny candidate for bounded waiting, never as proof
+of the hedge's price or as permission to trade. No exemption exists until both
+fresh executable books verify the actual USD caps and minimums. Large, unequal
+or one-sided inventory never gets this waiting exception. Waiting longer than
+`position_risk_max_age_sec` escalates to manual review (request latency can add
+delay); it does not start a blind exit. Failed account reads cannot resume
+strategy, and pending verification cannot persist indefinitely or clear old
+incident markers. Successful verification transitions to PAIRED-DUST.
