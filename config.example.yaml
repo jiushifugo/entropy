@@ -88,6 +88,9 @@ risk:
   # 同为3%表示同时禁加仓与触发退出，无单独预警缓冲；两个开关仍关闭。
   position_risk_exit_enabled: false
   position_risk_exit_distance_pct: 3.0
+  # Optional paired, untradeable dust observation. Per-leg USD cap, 0 = off.
+  # 双账户两次核验通过才观察；不允许单边豁免、不解除旧锁、不绕过加仓保护。
+  position_risk_paired_dust_max_usd: 0.5 # operator-confirmed per-leg ceiling
   daily_loss_limit_usd: 0.80
   # halt = reduce-only then halt flat; profit_only = keep running, but after
   # the loss limit only admit strategy trades whose budgeted net edge clears

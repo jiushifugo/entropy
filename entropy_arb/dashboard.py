@@ -337,9 +337,15 @@ class Dashboard:
                 "HALTED" if eng.halted else
                 "CLOSE-ONLY" if eng.risk_limited else
                 "PROFIT-ONLY" if eng.profit_only else "NORMAL")
+        dust = getattr(eng, "_paired_dust", None)
+        if mode == "NORMAL" and dust and 0 <= time.time() - dust["verified_at"] <= cfg.position_risk_max_age_sec:
+            mode = "PAIRED-DUST"
         mode_style = ("bold red" if eng.halted or eng.risk_limited else
                       "bold yellow" if eng.profit_only else "dim")
         g.add_row("risk mode", Text(mode, style=mode_style))
+        if mode == "PAIRED-DUST":
+            g.add_row("已配对尾仓（非空仓）" if self.lang == "zh" else "Paired dust (NOT flat)",
+                      Text(str(dust["positions"]), style="yellow"))
         snapshot = getattr(eng, "position_risk_snapshot", None)
         risk_error = getattr(eng, "position_risk_error", None)
         risk_label = "Entropy逐仓风险" if self.lang == "zh" else "Entropy margin risk"

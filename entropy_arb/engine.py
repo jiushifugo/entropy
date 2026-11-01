@@ -116,6 +116,7 @@ class Engine:
         self._review_snapshots = {}
         self._execution_halted = False
         self._position_risk_exit_active = False
+        self._paired_dust = None
 
     # ------------------------------------------------------------- utilities
 
@@ -1796,6 +1797,11 @@ class Engine:
                 or abs(snapshot["position"] - self.entropy.position) > 1e-10
                 or snapshot["distance_pct"] > self.cfg.position_risk_exit_distance_pct):
             return
+        dust = self._paired_dust
+        if (dust and 0 <= now - dust["verified_at"] <= self.cfg.position_risk_max_age_sec
+                and all(abs(v.position - dust["positions"][v.key]) <= 1e-10 for v in self.venues.values())
+                and self._paired_dust_candidate()):
+            return  # observed bounded residual, NOT flat and NOT entry approval
         self.halted = self._execution_halted = True
         path = self._position_review_path() + ".risk-exit"
         try:
@@ -1917,6 +1923,71 @@ class Engine:
                         "requested": confirmed, "filled": fill, "venue": v.key})
                     return
 
+    def _paired_dust_candidate(self):
+        cap = self.cfg.position_risk_paired_dust_max_usd
+        venues = [self.entropy, self.hedge]
+        if (cap <= 0 or self._position_review_required or self._execution_halted
+                or self._position_risk_exit_active or self._pending_entropy_oid is not None
+                or self._pending_cancel_context is not None or self.stop.is_set()
+                or any(not task.done() for task in self._exec_tasks)):
+            return False
+        positions = [v.position for v in venues]
+        if (not all(math.isfinite(p) and abs(p) > 1e-12 for p in positions)
+                or positions[0] * positions[1] >= 0 or abs(sum(positions)) > 1e-10):
+            return False
+        for v in venues:
+            if v.key in self._venue_down or not v.book.is_fresh(self.cfg.staleness_sec):
+                return False
+            bid, ask = v.book.best_bid(), v.book.best_ask()
+            if (not bid or not ask or not all(math.isfinite(p) and p > 0 for p in (bid, ask))
+                    or bid > ask):
+                return False
+            qty = abs(v.position)
+            # Ask bounds the per-leg notional for either sign. Both venues must
+            # independently be untradeable even at the top of their books.
+            if qty * ask > cap or not (qty < v.min_base or qty * ask < v.min_quote):
+                return False
+        return True
+
+    async def _refresh_paired_dust(self):
+        previous = self._paired_dust
+        self._paired_dust = None  # errors/stale reads never retain an exemption
+        if not self._paired_dust_candidate():
+            return
+        snapshot = getattr(self, "position_risk_snapshot", None)
+        if (not snapshot or getattr(self, "position_risk_error", None)
+                or not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec
+                or abs(snapshot["position"] - self.entropy.position) > 1e-10):
+            return
+        venues = [self.entropy, self.hedge]
+        if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
+               for v in venues):
+            return
+        async with self._vlock("entropy"), self._vlock("hedge"):
+            for attempt in range(2):
+                try:
+                    values = await asyncio.gather(*(v.fetch_position() for v in venues))
+                except Exception as exc:
+                    log.warning("[PAIRED DUST] cannot verify both accounts: %s; no exemption", exc)
+                    return
+                if not self._paired_dust_candidate():
+                    return
+                for v, actual in zip(venues, values):
+                    if not math.isfinite(actual) or abs(actual - v.position) > 1e-10:
+                        self._require_position_review("paired-dust-position-mismatch", {
+                            "venue": v.key, "local": v.position, "reported": str(actual)})
+                        return
+                if attempt == 0:
+                    await asyncio.sleep(1)
+            if not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec:
+                return
+            self._paired_dust = {"verified_at": time.time(),
+                                 "positions": {v.key: v.position for v in venues}}
+            if not previous or previous["positions"] != self._paired_dust["positions"]:
+                log.warning("[PAIRED DUST] verified opposite equal untradeable residuals %s; "
+                            "observe only, NOT flat; entry guard and liquidation locks remain active",
+                            self._paired_dust["positions"])
+
     async def _position_risk_loop(self):
         while not self.stop.is_set():
             try:
@@ -1924,10 +1995,12 @@ class Engine:
                     include_entry=self.cfg.position_risk_guard_enabled)
                 self.position_risk_error = None
                 log.info("[POSITION RISK] %s", self.position_risk_snapshot)
+                await self._refresh_paired_dust()
                 self._consider_position_risk_exit()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._paired_dust = None
                 self.position_risk_error = str(exc)
                 log.warning("[POSITION RISK] unavailable: %s", exc)
             self._update_evt.set()

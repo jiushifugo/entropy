@@ -64,6 +64,7 @@ position_risk_min_distance_pct: 0.0
 position_risk_max_age_sec: 15.0
 position_risk_exit_enabled: false
 position_risk_exit_distance_pct: 0.0
+position_risk_paired_dust_max_usd: 0.0
 ```
 
 With the guard OFF the strategy's admission logic is unchanged; only read-only
@@ -162,3 +163,34 @@ API references:
 - https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations
 - https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers
 - https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals
+
+## Optional paired dust observation / 可选已配对尾仓观察
+
+`risk.position_risk_paired_dust_max_usd` is a per-leg USD ceiling; default
+0 disables the exception. This cap is independent of the 3% distance settings.
+The operator has selected $0.50 per leg; the example file reflects this choice.
+The server config is NOT changed automatically. Omitting the key still defaults
+to zero/off. This is NOT forgiveness of
+all small positions, a flat-position substitution, or a liquidation guarantee.
+
+Only pre-existing equal/opposite residuals, below BOTH venues' executable
+minimums and below the configured per-leg ceiling at fresh ask prices, can be
+observed as PAIRED-DUST. Two reads of BOTH actual accounts must agree exactly
+with settled local inventory (1e-10 comparison tolerance), with no tracked
+execution/pending cancel, existing review lock, or active exit. Verification
+holds both venue locks. Failed/stale reads remove the observation; account
+mismatch locks for manual review. Unknown orders and liquidation incidents
+retain their usual manual locks. A stale observation never suppresses an exit.
+
+For this verified bounded state only, crossing the exit-distance threshold does
+not create a new permanent risk-exit lock. It sends no orders and neither adds
+collateral nor enlarges the position. Existing entry/projection checks remain
+unchanged: endangered dust can STILL block additions and flips. This change
+does not promise that strategy trading resumes. It does not suppress the
+liquidation event lock if the residual is later liquidated.
+
+Old `.position-review` and `.risk-exit` markers are NEVER automatically cleared.
+An exit already latched for a larger position stays latched even if only dust
+remains; its manual-review rules are unchanged. Operator account/open-order
+verification is still required before any manual archival/restart. Do not add
+positions just to meet minimum order size or disable the main risk guards.
