@@ -207,3 +207,15 @@ or one-sided inventory never gets this waiting exception. Waiting longer than
 delay); it does not start a blind exit. Failed account reads cannot resume
 strategy, and pending verification cannot persist indefinitely or clear old
 incident markers. Successful verification transitions to PAIRED-DUST.
+
+# Paired dust after a risk exit
+
+With a positive `position_risk_paired_dust_max_usd`, an already latched risk
+exit can observe residuals when both accounts match local positions on two
+reads, both books are fresh, and both legs are opposite, equal, individually
+untradeable and below the configured per-leg cap. The dashboard shows
+`RISK-EXIT-DUST`. The exit marker remains on disk and strategy stays halted;
+this does not resume trading or enlarge positions to meet minimums.
+Each exit-loop pass rechecks the accounts and eligibility. Unavailable reads
+do not retain verified status; mismatches or ineligible dust require review.
+Existing manual review locks are never cleared by this feature.

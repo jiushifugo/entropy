@@ -1836,6 +1836,7 @@ class Engine:
 
     async def _position_risk_exit_once(self):
         """Bounded paired reduction. Never submits again after an unknown result."""
+        self._risk_exit_dust = None
         if (not self._position_risk_exit_active or not self.cfg.position_risk_exit_enabled
                 or self._position_review_required or self.stop.is_set()
                 or self._pending_entropy_oid is not None):
@@ -1886,6 +1887,14 @@ class Engine:
             qty = floor_step(min(abs(self.entropy.position), abs(self.hedge.position),
                                  *(self.cfg.max_order_notional / r[2] for r in routes)), self._step)
             if any(qty < v.min_base or qty * px < v.min_quote for v, _, _, px in routes):
+                if self._paired_dust_candidate(exit_observation=True):
+                    # Both accounts were read twice under both venue locks above.
+                    # Keep the persistent exit latch; this is observation, not resume.
+                    self._risk_exit_dust = {"verified_at": time.time(),
+                                            "positions": {v.key: v.position for v in venues}}
+                    log.warning("[POSITION RISK EXIT] verified paired dust %s; exit remains latched; no orders",
+                                self._risk_exit_dust["positions"])
+                    return
                 self._require_position_review("risk-exit-dust", {"qty": qty})
                 return
             confirmed = None
@@ -1936,13 +1945,15 @@ class Engine:
                         "requested": confirmed, "filled": fill, "venue": v.key})
                     return
 
-    def _paired_dust_candidate(self, allow_unready=False):
+    def _paired_dust_candidate(self, allow_unready=False, exit_observation=False):
         cap = self.cfg.position_risk_paired_dust_max_usd
         venues = [self.entropy, self.hedge]
-        if (cap <= 0 or self._position_review_required or self._execution_halted
-                or self._position_risk_exit_active or self._pending_entropy_oid is not None
+        if (cap <= 0 or self._position_review_required
+                or ((self._execution_halted or self._position_risk_exit_active) and not exit_observation)
+                or self._pending_entropy_oid is not None
                 or self._pending_cancel_context is not None or self.stop.is_set()
-                or any(not task.done() for task in self._exec_tasks)):
+                or any(not task.done() and (not exit_observation or task is not asyncio.current_task())
+                       for task in self._exec_tasks)):
             return False
         positions = [v.position for v in venues]
         if (not all(math.isfinite(p) and abs(p) > 1e-12 for p in positions)

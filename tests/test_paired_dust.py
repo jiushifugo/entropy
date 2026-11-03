@@ -171,3 +171,43 @@ def test_old_incident_lock_is_not_cleared_by_startup_wait(tmp_path):
         assert Path(eng._position_review_path()).read_text() == before
         assert not calls
     asyncio.run(go())
+
+
+def test_exit_paired_dust_observed_without_unlock_or_orders(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng._consider_position_risk_exit()
+        marker = Path(eng._position_review_path() + ".risk-exit")
+        before = marker.read_text()
+        await eng._position_risk_exit_once()
+        assert eng._risk_exit_dust and not eng._position_review_required
+        assert eng.halted and eng._position_risk_exit_active and not calls
+        assert marker.read_text() == before
+        assert eng._scan(time.time()) is None
+        # Observation never exempts a later account mismatch.
+        async def changed():
+            return .001
+        eng.hedge.fetch_position = changed
+        await eng._position_risk_exit_once()
+        assert eng._risk_exit_dust is None and eng._position_review_required
+        assert not calls
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("case", ["off", "over-cap", "unequal", "unknown", "pending"])
+def test_exit_dust_does_not_hide_unverified_inventory(tmp_path, case):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng._consider_position_risk_exit()
+        if case == "off": eng.cfg.position_risk_paired_dust_max_usd = 0
+        if case == "over-cap": eng.cfg.position_risk_paired_dust_max_usd = .001
+        if case == "unequal": eng.hedge.position = .0002
+        if case == "pending": eng._pending_entropy_oid = 7
+        if case == "unknown":
+            async def fail():
+                raise RuntimeError("offline")
+            eng.hedge.fetch_position = fail
+        await eng._position_risk_exit_once()
+        assert eng._risk_exit_dust is None and not calls
+        assert eng.halted
+    asyncio.run(go())
