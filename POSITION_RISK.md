@@ -202,10 +202,13 @@ two account reads. When a book is not ready, the same-symbol Entropy mark is use
 ONLY to identify a possible tiny candidate for bounded waiting, never as proof
 of the hedge's price or as permission to trade. No exemption exists until both
 fresh executable books verify the actual USD caps and minimums. Large, unequal
-or one-sided inventory never gets this waiting exception. Waiting longer than
-`position_risk_max_age_sec` escalates to manual review (request latency can add
-delay); it does not start a blind exit. Failed account reads cannot resume
-strategy, and pending verification cannot persist indefinitely or clear old
+or one-sided inventory never gets this waiting exception. When both account
+positions verify twice but books are stale, strategy remains paused and retries
+verification without a permanent incident lock. Fresh books are still required
+before returning to PAIRED-DUST. Account verification failures lasting longer
+than `position_risk_max_age_sec` escalate to manual review (request latency can
+add delay); mismatches lock immediately. Failed account reads cannot resume
+strategy, and waiting for books cannot clear old
 incident markers. Successful verification transitions to PAIRED-DUST.
 
 # Paired dust after a risk exit

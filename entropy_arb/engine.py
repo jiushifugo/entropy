@@ -1806,6 +1806,9 @@ class Engine:
                 or snapshot["distance_pct"] > self.cfg.position_risk_exit_distance_pct):
             return
         if self._dust_verification_pending and self._paired_dust_candidate(allow_unready=True):
+            book_wait = getattr(self, "_dust_book_wait_verified_at", 0)
+            if 0 <= now - book_wait <= self.cfg.position_risk_max_age_sec:
+                return  # accounts verified; stale books keep strategy paused
             if (self._dust_verification_since is None or time.monotonic() - self._dust_verification_since
                     >= self.cfg.position_risk_max_age_sec):
                 self._require_position_review("paired-dust-verification-timeout", {})
@@ -1985,6 +1988,7 @@ class Engine:
 
     async def _refresh_paired_dust(self):
         previous = self._paired_dust
+        self._dust_book_wait_verified_at = 0
         self._paired_dust = None  # errors/stale reads never retain an exemption
         self._dust_verification_pending = False
         if not self._paired_dust_candidate(allow_unready=True):
@@ -1999,11 +2003,6 @@ class Engine:
         if self._dust_verification_since is None:
             self._dust_verification_since = time.monotonic()
             log.warning("[PAIRED DUST] verification pending; strategy paused until books and both accounts verify")
-        if time.monotonic() - self._dust_verification_since >= self.cfg.position_risk_max_age_sec:
-            self._require_position_review("paired-dust-verification-timeout", {})
-            return
-        if not self._paired_dust_candidate():
-            return
         venues = [self.entropy, self.hedge]
         if any(self._vlock(v.key).locked() or time.time() - v.last_traded_ts <= self.RECONCILE_GRACE_SEC
                for v in venues):
@@ -2014,8 +2013,10 @@ class Engine:
                     values = await asyncio.gather(*(v.fetch_position() for v in venues))
                 except Exception as exc:
                     log.warning("[PAIRED DUST] cannot verify both accounts: %s; no exemption", exc)
+                    if time.monotonic() - self._dust_verification_since >= self.cfg.position_risk_max_age_sec:
+                        self._require_position_review("paired-dust-verification-timeout", {})
                     return
-                if not self._paired_dust_candidate():
+                if not self._paired_dust_candidate(allow_unready=True):
                     return
                 for v, actual in zip(venues, values):
                     if not math.isfinite(actual) or abs(actual - v.position) > 1e-10:
@@ -2025,6 +2026,11 @@ class Engine:
                 if attempt == 0:
                     await asyncio.sleep(1)
             if not 0 <= time.time() - snapshot["observed_at"] <= self.cfg.position_risk_max_age_sec:
+                return
+            if not self._paired_dust_candidate():
+                self._dust_book_wait_verified_at = time.time()
+                self._dust_verification_since = None
+                log.warning("[PAIRED DUST] both accounts verified; waiting for fresh books; strategy paused")
                 return
             if time.monotonic() - self._dust_verification_since >= self.cfg.position_risk_max_age_sec:
                 self._require_position_review("paired-dust-verification-timeout", {})

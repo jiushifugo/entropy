@@ -134,15 +134,32 @@ def test_startup_unready_book_waits_then_verifies_without_exit_marker(tmp_path):
     asyncio.run(go())
 
 
-def test_unready_tiny_candidate_timeout_is_manual_not_blind_exit(tmp_path):
+def test_verified_accounts_wait_for_stale_book_without_permanent_lock(tmp_path):
     async def go():
         eng, calls = dust_engine(tmp_path)
         eng.hedge.book.ready = False
         await eng._refresh_paired_dust()
-        eng._dust_verification_since -= 60
+        eng._dust_verification_since = time.monotonic() - 60
+        await eng._refresh_paired_dust()
         eng._consider_position_risk_exit()
-        assert eng._position_review_reason == "paired-dust-verification-timeout"
+        assert not eng._position_review_required and eng._dust_verification_pending
         assert not eng._position_risk_exit_active and not calls
+        eng.hedge.set_book(100, 100.1)
+        await eng._refresh_paired_dust()
+        assert eng._paired_dust and not eng._dust_verification_pending
+    asyncio.run(go())
+
+
+def test_stale_book_does_not_hide_account_mismatch(tmp_path):
+    async def go():
+        eng, calls = dust_engine(tmp_path)
+        eng.hedge.book.ready = False
+        async def changed():
+            return 0
+        eng.hedge.fetch_position = changed
+        await eng._refresh_paired_dust()
+        assert eng._position_review_reason == "paired-dust-position-mismatch"
+        assert not calls
     asyncio.run(go())
 
 
