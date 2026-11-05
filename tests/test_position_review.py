@@ -6,6 +6,56 @@ from test_engine import make_engine
 from entropy_arb.venue_hl import HLOrderUpdatesFeed
 
 
+def test_recent_confirmed_fill_stale_position_rechecks_both_accounts(tmp_path, monkeypatch):
+    async def go():
+        eng = make_engine()
+        eng.cfg.daily_risk_state_file = str(tmp_path / 'risk.json')
+        eng.entropy.position, eng.hedge.position = -.7018, .7018
+        eng._confirmed_position_changes['hedge'] = {
+            'at': time.time() - 16, 'before': .6718, 'after': .7018}
+        reads = {'entropy': 0, 'hedge': 0}
+        async def entropy():
+            reads['entropy'] += 1
+            return -.7018
+        async def hedge():
+            reads['hedge'] += 1
+            return .6718 if reads['hedge'] <= 2 else .7018
+        async def no_sleep(_):
+            pass
+        monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+        eng.entropy.fetch_position, eng.hedge.fetch_position = entropy, hedge
+        await eng._reconcile_venue(eng.hedge, False)
+        assert eng._position_recheck and not eng._position_review_required
+        assert eng._scan(time.time()) is None
+        assert eng._position_risk_block(True, .1) == 'position-recheck-pending'
+        await eng._maybe_hedge()
+        assert not eng._exec_tasks
+        await eng._verify_position_recheck()
+        assert reads['entropy'] >= 3 and reads['hedge'] >= 4
+        assert not eng._position_recheck and not eng._position_review_required
+        assert eng.hedge.position == .7018
+    asyncio.run(go())
+
+
+def test_persistent_pre_fill_query_still_locks(tmp_path, monkeypatch):
+    async def go():
+        eng = make_engine()
+        eng.cfg.daily_risk_state_file = str(tmp_path / 'risk.json')
+        eng.entropy.position, eng.hedge.position = -.7, .7
+        eng._confirmed_position_changes['hedge'] = {
+            'at': time.time() - 16, 'before': .67, 'after': .7}
+        async def entropy(): return -.7
+        async def hedge(): return .67
+        async def no_sleep(_): pass
+        monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+        eng.entropy.fetch_position, eng.hedge.fetch_position = entropy, hedge
+        await eng._reconcile_venue(eng.hedge, False)
+        await eng._verify_position_recheck()
+        assert eng._position_review_reason == 'position-recheck-failed'
+        assert eng.hedge.position == .7 and eng.halted
+    asyncio.run(go())
+
+
 def test_liquidation_stream_filters_history_and_other_accounts():
     feed = HLOrderUpdatesFeed('ENTROPY', 'ws://unused', '0x123', 'io:SNDK')
     events = []

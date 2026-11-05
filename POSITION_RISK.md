@@ -222,3 +222,16 @@ this does not resume trading or enlarge positions to meet minimums.
 Each exit-loop pass rechecks the accounts and eligibility. Unavailable reads
 do not retain verified status; mismatches or ineligible dust require review.
 Existing manual review locks are never cleared by this feature.
+
+## Delayed position queries after confirmed fills
+
+If a position query returns exactly the pre-fill position of the latest known
+strategy fill (within 60 seconds), while local inventory equals its post-fill
+position, the engine pauses in `POSITION-RECHECK`. Unknown orders and pending
+cancellations are excluded. With both venue locks held, it queries both accounts
+every two seconds and requires two consecutive matches to unchanged local
+positions before resuming. Verification is bounded to 35 seconds; persistent
+differences, repeated query failures or interruption require manual review.
+It never adopts the older position or sends a compensating order. Differences
+unexplained by a confirmed fill still lock immediately. Existing incident locks
+are preserved; recent-fill evidence is process-local and does not survive restart.

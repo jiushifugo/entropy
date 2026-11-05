@@ -332,6 +332,7 @@ class Dashboard:
                        style="bold red" if eng.risk_limited else "dim"))
         mode = ("ORDER-VERIFY" if eng._position_review_reason == "managed-cancel-pending" else
                 "POSITION-REVIEW" if eng._position_review_required else
+                "POSITION-RECHECK" if getattr(eng, "_position_recheck", None) else
                 "RISK-EXIT" if getattr(eng, "_position_risk_exit_active", False) else
                 "HALTED-EXIT" if eng._execution_halted and cfg.flatten_on_execution_halt else
                 "HALTED" if eng.halted else

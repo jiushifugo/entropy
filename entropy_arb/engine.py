@@ -118,6 +118,8 @@ class Engine:
         self._position_risk_exit_active = False
         self._paired_dust = None
         self._dust_verification_pending = False
+        self._position_recheck = {}
+        self._confirmed_position_changes = {}
         self._dust_verification_since = None
 
     # ------------------------------------------------------------- utilities
@@ -620,7 +622,7 @@ class Engine:
 
     async def _evaluate(self) -> None:
         cfg = self.cfg
-        if self.halted or self._position_review_required:
+        if self.halted or self._position_review_required or self._position_recheck:
             return
         if self._pending_entropy_oid is not None:
             return
@@ -646,7 +648,7 @@ class Engine:
     def _volume_reason(self, now, buy, sell, dkey):
         """Read-only first blocking gate, sampled independently of book updates."""
         cfg = self.cfg
-        if self._dust_verification_pending:
+        if self._dust_verification_pending or self._position_recheck:
             return "risk"
         if self.halted:
             return "risk"
@@ -740,7 +742,7 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
-        if self._dust_verification_pending:
+        if self._dust_verification_pending or self._position_recheck:
             return None
         repair = self._residual_repair_plan()
         if repair is not None:
@@ -955,7 +957,7 @@ class Engine:
         """Send both legs and settle the fills. Both venue locks are held by
         the caller. Returns True when an outcome is unresolved and the caller
         must escalate to reconcile."""
-        if self.halted:
+        if self.halted or self._position_recheck:
             return False
         block = self._position_risk_plan_block(buy, sell, plan)
         if block:
@@ -1227,6 +1229,12 @@ class Engine:
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
         bfill = binfo["filled_base"]
         sfill = sinfo["filled_base"]
+        for venue, fill, sign, info in ((buy, bfill, 1, binfo), (sell, sfill, -1, sinfo)):
+            if (fill > 0 and math.isfinite(fill) and not info.get("unresolved")
+                    and info.get("status") in ("filled", "canceled")):
+                self._confirmed_position_changes[venue.key] = {
+                    "at": time.time(), "before": venue.position,
+                    "after": venue.position + sign * fill}
         buy.position += bfill
         sell.position -= sfill
         if bfill:
@@ -1386,7 +1394,7 @@ class Engine:
             "ok": ok})
 
     async def _maybe_hedge(self) -> None:
-        if self._position_review_required:
+        if self._position_review_required or self._position_recheck:
             return
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
@@ -1590,6 +1598,8 @@ class Engine:
         for r in got:
             if isinstance(r, BaseException):
                 raise r  # strict startup: fail loudly
+        if self._position_recheck:
+            await self._verify_position_recheck()
         await self._resolve_pending_entropy_order()
         if hedge:
             await self._maybe_hedge()
@@ -1717,6 +1727,15 @@ class Engine:
                 return
             if self._position_review_required or (not strict and abs(delta) > self.cfg.net_tolerance_base):
                 if not self._position_review_required:
+                    change = self._confirmed_position_changes.get(v.key)
+                    if (change and 0 <= time.time() - change["at"] <= 60
+                            and abs(change["after"] - v.position) <= 1e-10
+                            and abs(change["before"] - r) <= 1e-10
+                            and self._pending_entropy_oid is None
+                            and self._pending_cancel_context is None):
+                        self._position_recheck[v.key] = {"local": v.position, "reported": r}
+                        log.warning("[POSITION RECHECK] %s returned pre-fill position; strategy paused", v.key)
+                        return
                     self._require_position_review("unexpected-position-change", {
                         "venue": v.key, "local": v.position, "reported": r, "delta": delta})
                 if self._review_snapshots.get(v.key) != r:
@@ -1732,6 +1751,43 @@ class Engine:
                 if mid is not None:
                     v.cash -= delta * mid
                 v.position = r
+
+    async def _verify_position_recheck(self):
+        """Bounded dual-account recheck; never adopts inventory or sends orders."""
+        verified = False
+        try:
+            async with self._vlock("entropy"), self._vlock("hedge"):
+                expected = {v.key: v.position for v in self.venues.values()}
+                async def verify():
+                    consecutive = 0
+                    for attempt in range(16):
+                        if self._position_review_required or self.stop.is_set():
+                            return False
+                        try:
+                            values = await asyncio.gather(*(v.fetch_position() for v in self.venues.values()))
+                        except Exception:
+                            consecutive = 0
+                        else:
+                            matches = all(math.isfinite(p) and abs(p - expected[v.key]) <= 1e-10
+                                          and v.position == expected[v.key]
+                                          for v, p in zip(self.venues.values(), values))
+                            consecutive = consecutive + 1 if matches else 0
+                            if consecutive >= 2:
+                                return True
+                        await asyncio.sleep(2)
+                    return False
+                try:
+                    verified = await asyncio.wait_for(verify(), timeout=35)
+                except asyncio.TimeoutError:
+                    pass
+                if verified and not self._position_review_required and not self.stop.is_set():
+                    log.warning("[POSITION RECHECK] both accounts matched twice; strategy may resume")
+                elif not self._position_review_required and not self.stop.is_set():
+                    self._require_position_review("position-recheck-failed", dict(self._position_recheck))
+        finally:
+            if self._position_recheck and not verified and not self.stop.is_set() and not self._position_review_required:
+                self._require_position_review("position-recheck-interrupted", {})
+            self._position_recheck.clear()
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():
@@ -1763,6 +1819,8 @@ class Engine:
         return self._position_risk_block(is_buy, plan.qty, worst)
 
     def _position_risk_block(self, is_buy, qty, worst_price=None):
+        if self._position_recheck:
+            return "position-recheck-pending"
         if self._dust_verification_pending:
             return "paired-dust-verification-pending"
         if not getattr(self.cfg, "position_risk_guard_enabled", False):
