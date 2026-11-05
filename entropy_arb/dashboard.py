@@ -338,6 +338,7 @@ class Dashboard:
                 "HALTED" if eng.halted else
                 "DUST-VERIFY" if getattr(eng, "_dust_verification_pending", False) else
                 "CLOSE-ONLY" if eng.risk_limited else
+                "EQUITY-VERIFY" if getattr(eng, "_equity_unverified", False) else
                 "PROFIT-ONLY" if eng.profit_only else "NORMAL")
         dust = getattr(eng, "_paired_dust", None)
         exit_dust = getattr(eng, "_risk_exit_dust", None)
@@ -348,6 +349,10 @@ class Dashboard:
         mode_style = ("bold red" if eng.halted or eng.risk_limited else
                       "bold yellow" if eng.profit_only else "dim")
         g.add_row("risk mode", Text(mode, style=mode_style))
+        if getattr(eng, "_equity_unverified", False):
+            g.add_row("权益待核验" if self.lang == "zh" else "Equity unavailable",
+                      Text("暂停加仓；显示值可能为旧快照" if self.lang == "zh"
+                           else "Additions paused; displayed balances may be stale", style="yellow"))
         if mode == "RISK-EXIT-DUST":
             g.add_row("退出尾仓观察（仍停机）" if self.lang == "zh" else "Exit dust (still halted)",
                       Text(str(exit_dust["positions"]), style="yellow"))

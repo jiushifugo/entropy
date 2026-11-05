@@ -235,3 +235,18 @@ differences, repeated query failures or interruption require manual review.
 It never adopts the older position or sends a compensating order. Differences
 unexplained by a confirmed fill still lock immediately. Existing incident locks
 are preserved; recent-fill evidence is process-local and does not survive restart.
+
+## Incomplete equity snapshots
+
+Unified Hyperliquid equity uses portfolio day account value only. An unavailable
+portfolio response never falls back to clearinghouse buckets with a different
+scope. Bucket-only shared-account adapters require explicit account value and
+withdrawable fields; missing values, booleans and non-finite numbers are invalid.
+The engine validates every venue's equity snapshot, logs its source and value,
+and marks incomplete totals as unavailable instead of a loss. Incomplete polls
+reset consecutive loss confirmation, pause additions and flips, and retain the
+existing daily baseline and any latched incident/loss protections. Verified pure
+reductions and emergency hedges remain subject to their existing checks. Valid
+snapshots automatically release the equity-data pause; two consecutive valid
+loss snapshots still trigger daily protection, including explicitly reported zero
+equity. Missing-data recovery never automatically clears an existing daily lock.

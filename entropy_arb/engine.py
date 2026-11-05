@@ -94,6 +94,7 @@ class Engine:
         self.daily_risk_day = ""
         self.daily_equity_baseline: Optional[float] = None
         self.daily_pnl_usd: Optional[float] = None
+        self._equity_unverified = False
         self.daily_volume_usd = 0.0
         self.profit_only = False
         self.risk_limited = False
@@ -1808,6 +1809,10 @@ class Engine:
                 log.exception("reconcile failed")
 
     def _position_risk_plan_block(self, buy, sell, plan):
+        if self._equity_unverified and not (
+                buy.position < 0 and sell.position > 0
+                and 0 < plan.qty <= min(abs(buy.position), abs(sell.position))):
+            return "equity-unverified"
         if not self.cfg.position_risk_guard_enabled:
             return None
         is_buy = buy.key == "entropy"
@@ -1823,6 +1828,10 @@ class Engine:
             return "position-recheck-pending"
         if self._dust_verification_pending:
             return "paired-dust-verification-pending"
+        if self._equity_unverified:
+            delta = qty if is_buy else -qty
+            if not (self.entropy.position * delta < 0 and 0 < qty <= abs(self.entropy.position)):
+                return "equity-unverified"
         if not getattr(self.cfg, "position_risk_guard_enabled", False):
             return None
         snapshot = getattr(self, "position_risk_snapshot", None)
@@ -2211,12 +2220,25 @@ class Engine:
         total = 0.0
         valid = True
         for v, got in zip(self.venues.values(), vals):
-            if isinstance(got, BaseException) or got is None:
-                valid = False
+            source = getattr(v, "equity_source", type(v).__name__ + ":account")
+            try:
                 if isinstance(got, BaseException):
-                    log.debug("[%s] equity poll failed: %r", v.name, got)
+                    raise got
+                if got is None or len(got) != 2:
+                    raise ValueError("missing equity snapshot")
+                equity, free = got
+                if isinstance(equity, bool) or equity is None or not math.isfinite(float(equity)):
+                    raise ValueError("invalid account equity")
+                equity = float(equity)
+                if free is not None and (isinstance(free, bool) or not math.isfinite(float(free))):
+                    raise ValueError("invalid free collateral")
+                free = float(free) if free is not None else None
+            except Exception as exc:
+                valid = False
+                log.warning("[EQUITY] %s source=%s unavailable: %r; additions paused", v.name, source, exc)
                 continue
-            v.equity, v.free = got
+            v.equity, v.free = equity, free
+            log.info("[EQUITY] %s source=%s equity=%.8f", v.name, source, equity)
             if v.start_equity is None:
                 v.start_equity = v.equity
             total += v.equity
@@ -2228,15 +2250,15 @@ class Engine:
                 saved = {}
             if saved.get("utc_day") == day:
                 self.daily_risk_day = day
-                self.daily_equity_baseline = float(saved["equity_baseline"])
+                baseline = saved.get("equity_baseline")
+                self.daily_equity_baseline = float(baseline) if baseline is not None else None
                 self.daily_volume_usd = float(saved.get("volume_usd", 0.0))
                 self.profit_only = (
                     self.cfg.daily_loss_action == "profit_only"
                     and bool(saved.get("profit_only", False)))
         if self.daily_risk_day != day:
             self.daily_risk_day = day
-            if valid:
-                self.daily_equity_baseline = total
+            self.daily_equity_baseline = total if valid else None
             self.daily_volume_usd = 0.0
             self.daily_pnl_usd = 0.0 if valid else None
             self.profit_only = False
@@ -2247,6 +2269,12 @@ class Engine:
                 self._risk_halted = False
             self._save_daily_risk()
             log.warning("[DAILY RISK] new UTC day %s — counters reset", day)
+        self._equity_unverified = not valid
+        if not valid:
+            self._daily_loss_sample_streak = 0
+            self.daily_pnl_usd = None
+        if valid and self.daily_equity_baseline is None:
+            self.daily_equity_baseline = total
         if valid and self.daily_equity_baseline is not None:
             self.daily_pnl_usd = total - self.daily_equity_baseline
             self._save_daily_risk()

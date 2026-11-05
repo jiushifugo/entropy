@@ -937,34 +937,31 @@ class HLVenue:
         return c.account_address.lower() if c and c.account_address else None
 
     async def fetch_equity(self):
-        """Unified account equity via the portfolio endpoint — the same
-        Portfolio Value the HL UI shows. Falls back to summing clearinghouse
-        buckets if the endpoint shape changes. When both venues share one HL
-        account (include_core_equity cleared on the hedge), that venue reports
-        only its dex bucket to avoid double-counting."""
+        """Keep one equity scope; missing data is unavailable, never zero."""
         addr = self._query_address()
         if addr is None:
             return None
+        def amount(value):
+            if value is None or isinstance(value, bool) or value == "":
+                raise ValueError("missing account equity amount")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError("non-finite account equity amount")
+            return result
         if self.include_core_equity:
-            try:
-                p = await self._info({"type": "portfolio", "user": addr})
-                for period, d in p:
-                    if period == "day":
-                        hist = d.get("accountValueHistory") or []
-                        if hist:
-                            return float(hist[-1][1]), None
-            except Exception as e:
-                log.debug("[%s] portfolio fetch failed, falling back: %r",
-                          self.name, e)
-        dexs = [self.conf.hl_dex] + ([""] if self.include_core_equity else [])
-        eq = fr = 0.0
-        for dex in dexs:
-            st = await self._info({"type": "clearinghouseState", "user": addr,
-                                   "dex": dex})
-            ms = st.get("marginSummary") or {}
-            eq += float(ms.get("accountValue") or 0.0)
-            fr += float(st.get("withdrawable") or 0.0)
-        return eq, fr
+            self.equity_source = "hl:portfolio:day"
+            p = await self._info({"type": "portfolio", "user": addr})
+            days = [d for period, d in p if period == "day"]
+            if len(days) != 1:
+                raise ValueError("missing or duplicate portfolio day")
+            hist = days[0].get("accountValueHistory")
+            if not hist or len(hist[-1]) != 2:
+                raise ValueError("missing portfolio account value history")
+            return amount(hist[-1][1]), None
+        self.equity_source = "hl:clearinghouse:" + self.conf.hl_dex
+        st = await self._info({"type": "clearinghouseState", "user": addr,
+                               "dex": self.conf.hl_dex})
+        return amount(st["marginSummary"]["accountValue"]), amount(st["withdrawable"])
 
     async def fetch_position_risk(self, include_entry=False):
         """Never uses book mid as a substitute for the liquidation mark."""
