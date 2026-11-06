@@ -142,7 +142,13 @@ unchanged and does not request active-asset entry evidence.
 For flat inventory, collateral credit is limited to the smaller of mark/limit
 notional divided by selected leverage. Nonzero unexplained flat rawUsd is
 blocked. For additions, equity is reconstructed from the reported liquidation
-price and single-tier maintenance rate; NO new collateral credit is assumed.
+price and single-tier maintenance rate. The estimated new margin allocation is
+the smaller of (a) this order's minimum initial margin and (b) the combined
+position's minimum initial margin minus reconstructed existing equity, floored
+at zero. This counts a bounded initial-margin estimate without double-counting
+retained PnL or extra collateral already in the position. It never credits the
+whole wallet. `estimated_margin_credit` exposes the allocation assumption;
+`equity_lower_bound` is conditional on that model, not a proven exchange bound.
 Adverse entry-vs-mark PnL, entry fees and an exit-fee reserve are subtracted.
 Favorable PnL is not credited. Projected liquidation is solved from equity at
 mark and maintenance rate, then compared with the configured distance. Capacity
@@ -151,7 +157,10 @@ checks also require enough directional available margin and maximum trade size.
 This is intentionally conservative and can block trades that the venue would
 accept (especially additions). Mark/account reads are not atomic; the model
 does not guarantee allocation, future funding, liquidation behavior, execution
-price after API delay or successful exits. A model pass is NOT a live safety
+price after API delay or successful exits. Initial-margin and isolated-liquidation
+references: https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining and
+https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations . Actual
+post-fill margin and liquidation telemetry remain authoritative. A model pass is NOT a live safety
 certificate. Snapshot freshness checks and post-fill monitoring still apply.
 Unknown fields, stale data, leverage changes or unsupported tiers fail closed.
 Server preflight/model verification and live/nonflat telemetry remain unverified;

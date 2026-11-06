@@ -123,8 +123,9 @@ def project_entry(snapshot, evidence, is_buy, qty, worst_px, fee_bps,
 
     Flat: credit only minimum initial collateral, never the whole wallet.
     Addition: reconstruct existing equity from the reported liquidation price;
-    credit ZERO new collateral (a conservative lower bound), subtract adverse
-    fill-vs-mark PnL and reserve entry/exit fees. Never models position flips.
+    estimate new allocation capped by both incremental initial margin and the
+    combined position's initial-margin deficit. Subtract adverse fill-vs-mark
+    PnL and reserve entry/exit fees. Never models position flips.
     """
     now = time.time() if now is None else now
     try:
@@ -149,22 +150,33 @@ def project_entry(snapshot, evidence, is_buy, qty, worst_px, fee_bps,
         leverage = number(evidence["leverage"], positive=True)
         if rate >= 1:
             raise ValueError("invalid maintenance rate")
+        if leverage <= 0 or leverage > 1 / (2 * rate) + 1e-10:
+            raise ValueError("leverage exceeds verified market maximum")
         if qty > evidence["max_sizes"][idx] + 1e-10:
             return {"reason": "position-risk-order-capacity"}
         fees = qty * px * fee
         required = qty * max(mark, px) / leverage + fees
         if required > evidence["available_margin"][idx]:
             return {"reason": "position-risk-insufficient-margin"}
+        total_size = abs(position) + qty
+        margin_credit = qty * min(mark, px) / leverage
         if position == 0:
             if abs(evidence["raw_usd"]) > 1e-10:
                 raise ValueError("unexpected flat isolated cash")
-            equity = qty * min(mark, px) / leverage
+            equity = margin_credit
         else:
             if snapshot["leverage"] != leverage:
                 raise ValueError("leverage changed")
             liquidation = number(snapshot["liquidation_px"], positive=True)
             equity = abs(position) * (side * (mark - liquidation) + rate * liquidation)
-        total_size = abs(position) + qty
+            if equity <= 0:
+                raise ValueError("existing isolated equity is non-positive")
+            # Avoid double-crediting retained PnL / manually added collateral.
+            # This is a model of a successful increase, not a wallet transfer
+            # or a guarantee about the eventual exchange margin allocation.
+            deficit = max(0.0, total_size * min(mark, px) / leverage - equity)
+            margin_credit = min(margin_credit, deficit)
+            equity += margin_credit
         # Do not credit favorable execution PnL; reserve both entry and exit.
         equity -= max(0.0, qty * side * (px - mark)) + fees + total_size * max(mark, px) * fee
         liq = (side * total_size * mark - equity) / (total_size * (side - rate))
@@ -173,6 +185,7 @@ def project_entry(snapshot, evidence, is_buy, qty, worst_px, fee_bps,
             raise ValueError("unmodeled liquidation price")
         return {"reason": "position-risk-projected-distance" if distance <= min_distance_pct else None,
                 "estimated_liquidation_px": liq, "estimated_distance_pct": distance,
-                "initial_margin_required": required, "equity_lower_bound": equity}
+                "initial_margin_required": required, "equity_lower_bound": equity,
+                "estimated_margin_credit": margin_credit}
     except (ValueError, TypeError, KeyError, ZeroDivisionError, OverflowError) as exc:
         return {"reason": "position-risk-entry-unavailable", "error": str(exc)}

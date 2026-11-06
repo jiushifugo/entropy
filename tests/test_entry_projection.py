@@ -70,15 +70,50 @@ def test_stale_capacity_funds_and_flat_cash_fail_closed():
     assert project_entry(snapshot, entry, True, .1, 100, .9, 3, 15)["reason"] == "position-risk-entry-unavailable"
 
 
-def test_addition_gets_no_new_margin_credit_and_flip_is_blocked():
+def test_addition_margin_is_capped_and_flip_is_blocked():
     snapshot, entry = evidence()
     snapshot.update(position=1, mark_px=100, liquidation_px=96, leverage=15)
     small = project_entry(snapshot, entry, True, .01, 100, .9, 3, 15)
     large = project_entry(snapshot, entry, True, 1, 100, .9, 3, 15)
     assert small["reason"] is None
-    assert large["reason"] == "position-risk-projected-distance"
+    assert large["reason"] is None
+    assert 0 < large["estimated_margin_credit"] <= 100 / 15
     assert large["estimated_distance_pct"] < small["estimated_distance_pct"]
     assert project_entry(snapshot, entry, False, 2, 100, .9, 3, 15)["reason"] == "position-risk-flip-unmodeled"
+
+
+@pytest.mark.parametrize("buy", [True, False])
+def test_tiny_existing_position_addition_counts_bounded_initial_margin(buy):
+    snapshot, entry = evidence()
+    side = 1 if buy else -1
+    entry.update(leverage=10, mark_px=822.13)
+    snapshot.update(position=side * .0011, mark_px=822.13,
+                    liquidation_px=542.1075 if buy else 1102.1525, leverage=10)
+    qty = 50 / 822.13
+    result = project_entry(snapshot, entry, buy, qty, 822.13, .9, 3, 15)
+    assert result["reason"] is None
+    assert 3 < result["estimated_distance_pct"] < 10
+    assert 0 < result["estimated_margin_credit"] <= 5
+    # Ample wallet funds must never turn into extra isolated collateral credit.
+    entry["available_margin"] = [1e9, 1e9]
+    assert project_entry(snapshot, entry, buy, qty, 822.13, .9, 3, 15) == result
+    entry["available_margin"] = [0, 0]
+    assert project_entry(snapshot, entry, buy, qty, 822.13, .9, 3, 15)["reason"] == "position-risk-insufficient-margin"
+
+
+def test_overcollateralized_position_does_not_double_count_added_margin():
+    snapshot, entry = evidence()
+    snapshot.update(position=1, mark_px=100, liquidation_px=50, leverage=15)
+    result = project_entry(snapshot, entry, True, .01, 100, .9, 3, 15)
+    assert result["reason"] is None
+    assert result["estimated_margin_credit"] == 0
+
+
+def test_adverse_fill_still_blocks_an_addition_with_margin_credit():
+    snapshot, entry = evidence()
+    snapshot.update(position=1, mark_px=100, liquidation_px=96, leverage=15)
+    result = project_entry(snapshot, entry, True, 1, 110, .9, 3, 15)
+    assert result["reason"] == "position-risk-projected-distance"
 
 
 def test_engine_flat_entry_now_needs_and_uses_evidence():
