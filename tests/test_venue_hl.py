@@ -109,6 +109,52 @@ def test_partial_submit_rejects_stale_final_cumulative_size():
     asyncio.run(go())
 
 
+def test_managed_cancel_recovers_terminal_websocket_update_by_oid():
+    async def go():
+        for status, remaining, expected in [
+                ("filled", "0", .0163), ("canceled", ".0123", .004)]:
+            venue, calls = partial_submit_venue("open", 0)
+            feed = HLOrderUpdatesFeed("ENTROPY", "ws://unused", "0x123", "io:SNDK")
+            venue.order_feed = feed
+
+            async def cancel(oid):
+                calls.append(("cancel", oid))
+                feed._handle_message({
+                    "channel": "orderUpdates",
+                    "data": [{
+                        "status": status,
+                        "order": {"coin": "io:SNDK", "oid": oid, "side": "A",
+                                  "origSz": ".0163", "sz": remaining},
+                    }],
+                })
+                return "cancel outcome unknown"
+
+            venue._cancel_by_oid = cancel
+            result = await venue.send_managed_limit(
+                is_buy=False, qty=.0163, limit_px=1373.5, ttl_sec=1,
+                keep_open=lambda: True)
+            assert result["status"] == status
+            assert abs(result["filled_base"] - expected) < 1e-10
+            assert result["confirm_source"] == "ws-oid"
+            assert not result["unresolved"] and result["err"] is None
+            assert calls == [("status", 77), ("cancel", 77)]
+    asyncio.run(go())
+
+
+def test_managed_cancel_last_read_confirms_fill_before_handoff():
+    async def go():
+        venue, calls = partial_submit_venue("filled", .0163)
+        # No regular settlement window remains. The final OID read still runs.
+        venue.settle_timeout = 0
+        result = await venue.send_managed_limit(
+            is_buy=False, qty=.0163, limit_px=1373.5, ttl_sec=1,
+            keep_open=lambda: True)
+        assert result["status"] == "filled" and result["filled_base"] == .0163
+        assert not result["unresolved"]
+        assert calls == [("status", 77), ("cancel", 77), ("status", 77)]
+    asyncio.run(go())
+
+
 def test_partial_submit_already_closed_does_not_cancel_again():
     async def go():
         final = {'status': 'canceled', 'filled_base': .0005, 'avg_px': None,

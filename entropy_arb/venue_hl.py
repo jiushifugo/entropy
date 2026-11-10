@@ -81,6 +81,7 @@ class HLOrderUpdatesFeed:
         self.ready = asyncio.Event()
         self._pending: dict[str, asyncio.Future] = {}
         self._early: dict[str, dict] = {}
+        self.managed_final_by_oid: dict[int, dict] = {}
         self._post_pending: dict[int, asyncio.Future] = {}
         self._post_seq = int(time.time() * 1000)
         self._ws = None
@@ -216,6 +217,17 @@ class HLOrderUpdatesFeed:
                 continue
             cloid = self._key(order.get("cloid"))
             if not cloid:
+                # Managed HIP-3 orders have no cloid. Keep the terminal
+                # update so it is available even if it precedes the post reply.
+                if status not in {"filled", "rejected"} and not status.endswith(("canceled", "cancelled")):
+                    continue
+                oid = order.get("oid")
+                if type(oid) is int and oid > 0:
+                    self.managed_final_by_oid[oid] = {
+                        "status": status, "order": order,
+                    }
+                    if len(self.managed_final_by_oid) > 512:
+                        self.managed_final_by_oid.pop(next(iter(self.managed_final_by_oid)))
                 continue
             try:
                 original = float(order.get("origSz") or 0.0)
@@ -445,11 +457,17 @@ class HLVenue:
                                    "oid": oid})
         except Exception:
             return None
-        if not st or st.get("status") != "order":
+        if not isinstance(st, dict) or st.get("status") != "order":
             return None
-        wrapped = st.get("order") or {}
+        wrapped = st.get("order")
+        if not isinstance(wrapped, dict):
+            return None
         status = str(wrapped.get("status", "unknown"))
-        order = wrapped.get("order") or {}
+        order = wrapped.get("order")
+        if not isinstance(order, dict):
+            return None
+        if isinstance(oid, int) and (order.get("oid") != oid or order.get("coin") != self.coin):
+            return None
         try:
             original = float(order["origSz"])
             remaining = float(order["sz"])
@@ -533,7 +551,10 @@ class HLVenue:
                     continue
                 # Remaining size can be smaller after a partial fill, but it
                 # can never exceed the submitted quantity.
-                if float(order.get("sz") or 0.0) > qty + 1e-9:
+                original = float(order["origSz"])
+                remaining = float(order["sz"])
+                if (not math.isfinite(original) or abs(original - qty) > 1e-10
+                        or not 0 <= remaining <= original):
                     continue
                 matches.append(int(order["oid"]))
             except (KeyError, TypeError, ValueError):
@@ -636,29 +657,62 @@ class HLVenue:
 
         resting = time.monotonic()
         deadline = resting + max(ttl_sec, 0.0)
-        last_seen = None
         cancel_reason = "ttl"
 
         def validated_status(status):
             nonlocal known_fill
-            if status is None:
+            if status is None or status.get("unresolved") or status.get("err"):
                 return None
             state = str(status.get("status") or "").lower()
             if state not in {"open", "filled", "rejected"} and not state.endswith(("canceled", "cancelled")):
                 return None
-            value = float(status.get("filled_base") or 0.0)
+            try:
+                value = float(status["filled_base"])
+            except (KeyError, TypeError, ValueError):
+                return None
             if (not math.isfinite(value) or value < known_fill - 1e-10
                     or value > qty + 1e-10):
                 return None  # inconsistent/stale accounting is not finality
-            if status.get("status") == "filled" and abs(value - qty) > 1e-10:
+            if state == "filled" and abs(value - qty) > 1e-10:
                 return None
             known_fill = max(known_fill, value)
-            return status
+            return {**status, "status": state, "filled_base": known_fill}
+
+        def ws_final():
+            updates = getattr(self.order_feed, "managed_final_by_oid", {})
+            update = updates.get(oid)
+            if update is None:
+                return None
+            order = update["order"]
+            if order.get("side") != ("B" if is_buy else "A"):
+                return None
+            try:
+                original = float(order["origSz"])
+                remaining = float(order["sz"])
+                if (not math.isfinite(original) or not math.isfinite(remaining)
+                        or abs(original - qty) > 1e-10 or not 0 <= remaining <= original):
+                    return None
+            except (KeyError, TypeError, ValueError):
+                return None
+            state = update["status"]
+            fill = original if state == "filled" else original - remaining
+            return validated_status({"status": state, "filled_base": fill,
+                                     "avg_px": None, "err": None, "unresolved": False,
+                                     "confirm_source": "ws-oid"})
+
+        async def check_status(timeout=None):
+            final = ws_final()
+            if final is not None:
+                return final
+            try:
+                result = await asyncio.wait_for(self._order_status(oid), timeout)
+            except asyncio.TimeoutError:
+                result = None
+            return ws_final() or validated_status(result)
 
         while True:
-            status = validated_status(await self._order_status(oid))
+            status = await check_status()
             if status is not None:
-                last_seen = status
                 if status["status"] != "open":
                     return with_source(status)
                 if float(status.get("filled_base") or 0.0) > 0:
@@ -691,13 +745,19 @@ class HLVenue:
         cancel_started = time.monotonic()
         cancel_err = await self._cancel_by_oid(oid)
         settle_deadline = time.monotonic() + self.settle_timeout
-        while time.monotonic() < settle_deadline:
-            status = validated_status(await self._order_status(oid))
+        while (remaining := settle_deadline - time.monotonic()) > 0:
+            status = await check_status(remaining)
             if status is not None:
-                last_seen = status
                 if status["status"] != "open":
                     return with_source(status)
-            await asyncio.sleep(0.20)
+            await asyncio.sleep(min(0.20, max(0.0, settle_deadline - time.monotonic())))
+        # One last read while this execution still owns both venue locks.
+        # A terminal fill here goes through the original hedge leg exactly once.
+        status = await check_status(timeout=2.0)
+        if status is not None and status["status"] != "open":
+            log.warning("[%s] managed cancel recovered oid=%s status=%s fill=%.8g",
+                        self.name, oid, status["status"], status["filled_base"])
+            return with_source(status)
         # Never claim a clean cancellation when the final chain state is not
         # known: the engine will reconcile and pause strategy flow.
         filled = known_fill
