@@ -154,3 +154,17 @@ def test_plan_gate_blocks_unsafe_order_before_any_first_leg():
     eng.entropy.send_taker = eng.hedge.send_taker = forbidden
     plan = SimpleNamespace(qty=.1, buy_limit=101, sell_limit=102)
     assert asyncio.run(eng._execute(eng.entropy, eng.hedge, plan)) is False
+
+
+@pytest.mark.parametrize("raw_usd, expected", [(320, None), (0, "position-risk-entry-unavailable")])
+def test_null_liquidation_long_requires_verified_positive_isolated_cash(raw_usd, expected):
+    snapshot, entry = evidence()
+    snapshot.update(position=0.2315, mode="isolated", leverage=15,
+                    liquidation_px=None, mark_px=846.44,
+                    margin_used=516.40, raw_usd=320)
+    entry.update(mark_px=846.44, raw_usd=raw_usd)
+    result = project_entry(snapshot, entry, True, 0.2315, 847, .9, 3, 15)
+    assert result["reason"] == expected
+    if expected is None:
+        assert result["estimated_liquidation_px"] is None
+        assert result["estimated_distance_pct"] == 100

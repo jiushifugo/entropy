@@ -49,6 +49,7 @@ def parse_position_risk(state, coin, contexts, now=None):
     mark = number(ctxs[indices[0]].get("markPx"), positive=True)
     result["mark_px"] = mark
     if result["liquidation_px"] is None:
+        result["raw_usd"] = lev.get("rawUsd")
         return result
     # Signed: negative means already at/beyond the reported liquidation level.
     result["distance_pct"] = ((mark - result["liquidation_px"]) if size > 0
@@ -67,6 +68,9 @@ def entry_block_reason(snapshot, error, local_position, is_buy, qty,
     if abs(position - local_position) > 1e-10:
         return "position-risk-position-changed"
     if position != 0 and snapshot.get("distance_pct") is None:
+        if (position > 0 and is_buy and snapshot["mode"] == "isolated"
+                and snapshot["margin_used"] > position * snapshot["mark_px"]):
+            return None  # additions still require the post-fill projection
         return "position-risk-unavailable"
     delta = qty if is_buy else -qty
     # Never allow a nominal reduction to cross through zero into a new position.
@@ -172,8 +176,18 @@ def project_entry(snapshot, evidence, is_buy, qty, worst_px, fee_bps,
         else:
             if snapshot["leverage"] != leverage:
                 raise ValueError("leverage changed")
-            liquidation = number(snapshot["liquidation_px"], positive=True)
-            equity = abs(position) * (side * (mark - liquidation) + rate * liquidation)
+            if snapshot["liquidation_px"] is None:
+                if position <= 0 or snapshot["mode"] != "isolated":
+                    raise ValueError("missing liquidation price for unsupported position")
+                cash = min(number(snapshot.get("raw_usd"), positive=True),
+                           number(evidence.get("raw_usd"), positive=True),
+                           number(snapshot["margin_used"]) - position * snapshot["mark_px"])
+                if cash <= 0:
+                    raise ValueError("positive isolated cash not verified")
+                equity = cash + position * mark
+            else:
+                liquidation = number(snapshot["liquidation_px"], positive=True)
+                equity = abs(position) * (side * (mark - liquidation) + rate * liquidation)
             if equity <= 0:
                 raise ValueError("existing isolated equity is non-positive")
             # Avoid double-crediting retained PnL / manually added collateral.
@@ -186,7 +200,11 @@ def project_entry(snapshot, evidence, is_buy, qty, worst_px, fee_bps,
         equity -= max(0.0, qty * side * (px - mark)) + fees + total_size * max(mark, px) * fee
         liq = (side * total_size * mark - equity) / (total_size * (side - rate))
         distance = side * (mark - liq) / mark * 100
-        if not all(math.isfinite(v) for v in (equity, liq, distance)) or liq <= 0:
+        if (position > 0 and snapshot["liquidation_px"] is None
+                and math.isfinite(liq) and liq <= 0):
+            # Zero is the adverse price floor, not a reported liquidation price.
+            liq, distance = None, 100.0
+        elif not all(math.isfinite(v) for v in (equity, liq, distance)) or liq <= 0:
             raise ValueError("unmodeled liquidation price")
         return {"reason": "position-risk-projected-distance" if distance <= min_distance_pct else None,
                 "estimated_liquidation_px": liq, "estimated_distance_pct": distance,
