@@ -374,9 +374,13 @@ class Dashboard:
         else:
             risk_text = (f'{snapshot["mode"]} {snapshot["leverage"]:g}x | '
                          f'margin ${snapshot["margin_used"]:.2f}')
-            g.add_row("mark / liq / distance",
-                      Text(f'{snapshot["mark_px"]:.4f} / {snapshot["liquidation_px"]:.4f}'
-                           f' / {snapshot["distance_pct"]:.2f}%'))
+            if snapshot["liquidation_px"] is None:
+                risk_text += " | 未提供强平价" if self.lang == "zh" else " | liquidation price unavailable"
+                g.add_row("mark / liq / distance", Text(f'{snapshot["mark_px"]:.4f} / — / —'))
+            else:
+                g.add_row("mark / liq / distance",
+                          Text(f'{snapshot["mark_px"]:.4f} / {snapshot["liquidation_px"]:.4f}'
+                               f' / {snapshot["distance_pct"]:.2f}%'))
         g.add_row(risk_label, Text(risk_text, style="yellow"))
         g.add_row("position risk entry guard",
                   Text("ON" if getattr(cfg, "position_risk_guard_enabled", False) else "OFF (observe only)"))

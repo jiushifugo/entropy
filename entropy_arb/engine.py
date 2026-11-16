@@ -1870,6 +1870,7 @@ class Engine:
             return
         if (snapshot["position"] == 0 or snapshot["mode"] != "isolated"
                 or abs(snapshot["position"] - self.entropy.position) > 1e-10
+                or snapshot.get("distance_pct") is None
                 or snapshot["distance_pct"] > self.cfg.position_risk_exit_distance_pct):
             return
         if self._dust_verification_pending and self._paired_dust_candidate(allow_unready=True):

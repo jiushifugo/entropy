@@ -29,7 +29,19 @@ def test_flat_is_not_assumed_margin_safe():
     assert entry_block_reason(snap, None, 0, True, .1, 3, 15, now=100) == "position-risk-flat-unverified"
 
 
-@pytest.mark.parametrize("value", [None, "nan", "inf", "-1", "0", True])
+def test_null_liquidation_preserves_position_but_blocks_strategy():
+    state, ctx = sample()
+    state["assetPositions"][0]["position"]["liquidationPx"] = None
+    snap = parse_position_risk(state, "io:SNDK", ctx, now=100)
+    assert snap["position"] != 0
+    assert snap["liquidation_px"] is None
+    assert snap["distance_pct"] is None
+    assert entry_block_reason(
+        snap, None, snap["position"], True, .1, 3, 15, now=100
+    ) == "position-risk-unavailable"
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "0", True])
 def test_invalid_liquidation_is_not_safe(value):
     state, ctx = sample()
     state["assetPositions"][0]["position"]["liquidationPx"] = value

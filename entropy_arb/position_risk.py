@@ -38,7 +38,8 @@ def parse_position_risk(state, coin, contexts, now=None):
     lev = pos.get("leverage") or {}
     result.update(mode=lev.get("type"), leverage=number(lev.get("value"), positive=True),
                   margin_used=number(pos.get("marginUsed")),
-                  liquidation_px=number(pos.get("liquidationPx"), positive=True))
+                  liquidation_px=(number(pos["liquidationPx"], positive=True)
+                                  if pos.get("liquidationPx") is not None else None))
     if result["mode"] not in ("isolated", "cross") or result["margin_used"] < 0:
         raise ValueError("invalid margin metadata")
     meta, ctxs = contexts
@@ -47,6 +48,8 @@ def parse_position_risk(state, coin, contexts, now=None):
         raise ValueError("mark price identity missing")
     mark = number(ctxs[indices[0]].get("markPx"), positive=True)
     result["mark_px"] = mark
+    if result["liquidation_px"] is None:
+        return result
     # Signed: negative means already at/beyond the reported liquidation level.
     result["distance_pct"] = ((mark - result["liquidation_px"]) if size > 0
                               else (result["liquidation_px"] - mark)) / mark * 100
@@ -63,6 +66,8 @@ def entry_block_reason(snapshot, error, local_position, is_buy, qty,
     position = snapshot["position"]
     if abs(position - local_position) > 1e-10:
         return "position-risk-position-changed"
+    if position != 0 and snapshot.get("distance_pct") is None:
+        return "position-risk-unavailable"
     delta = qty if is_buy else -qty
     # Never allow a nominal reduction to cross through zero into a new position.
     if position * delta < 0 and qty <= abs(position) + 1e-10:

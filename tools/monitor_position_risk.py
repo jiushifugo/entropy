@@ -42,7 +42,13 @@ def collect(account, coin, dex, request=query, include_entry=False):
             snapshot["entry"] = parse_entry_evidence(active, contexts[0], account, coin, started)
         except Exception as exc:
             snapshot["entry_error"] = str(exc)
-    snapshot["status"] = "FLAT" if snapshot["position"] == 0 else "OBSERVED"
+    if snapshot["position"] == 0:
+        snapshot["status"] = "FLAT"
+    elif snapshot["distance_pct"] is None:
+        snapshot["status"] = "UNKNOWN"
+        snapshot["error"] = "liquidation price unavailable"
+    else:
+        snapshot["status"] = "OBSERVED"
     return snapshot
 
 
