@@ -578,3 +578,19 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print(f"{name:40s} OK")
+
+
+def test_add_net_floor_applies_to_open_and_increase_but_preserves_reduction():
+    eng = make_engine(midline=12.2, upper=.05, lower=.05)
+    eng.cfg.min_add_net_bps = 1.0
+    eng.cfg.second_leg_latency_reserve_bps = 8.0
+    eng.cfg.inventory_scale_bps = 0
+    e, h = eng.entropy, eng.hedge
+    approx(eng._eff_threshold(e, h), 9.0)
+    e.position, h.position = 1, -1
+    approx(eng._eff_threshold(e, h), 9.0)
+    approx(eng._eff_threshold(h, e), 12.2 - eng.cfg.exit_bps + 8)
+    e.position, h.position = -1, 1
+    approx(eng._eff_threshold(e, h), -12.2 - eng.cfg.exit_bps + 8)
+    eng.cfg.midline_bps = -12.2
+    approx(eng._eff_threshold(h, e), 9.0)

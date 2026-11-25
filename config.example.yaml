@@ -67,6 +67,10 @@ sizing:
 # 当某交易所持仓超过上限的 floor_frac 后，同方向继续加仓需额外溢价，线性增加到
 # 满仓时的 scale_bps。避免单边持仓快速堆满。 scale_bps: 0 disables / 0 为关闭。
 inventory:
+  # 0 preserves midline-only admission. Positive values set an absolute net
+  # floor for new/increased pairs, before the serial-leg latency reserve.
+  # 正值为新开仓/加仓设置净收益门槛，另加第二腿延迟储备；配对减仓沿用退出门槛。
+  min_add_net_bps: 0.0
   scale_bps: 10.0
   floor_frac: 0.5
   # Balanced dust may cross zero only when its budgeted net edge clears this.

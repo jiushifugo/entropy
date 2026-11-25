@@ -131,6 +131,7 @@ class Config:
     max_order_notional: float
     min_order_notional: float
     # inventory ladder
+    min_add_net_bps: float
     inventory_scale_bps: float
     inventory_floor_frac: float
     dust_flip_min_net_bps: float
@@ -223,6 +224,7 @@ _SCHEMA: Dict[str, Any] = {
         "min_order_notional_usd": float,
     },
     "inventory": {
+        "min_add_net_bps": float,
         "scale_bps": float,
         "floor_frac": float,
         "dust_flip_min_net_bps": float,
@@ -466,6 +468,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if daily_loss_action not in ("halt", "profit_only"):
         raise ConfigError("risk.daily_loss_action must be 'halt' or "
                           "'profit_only'")
+    min_add_net_bps = float(_get(raw, "inventory", "min_add_net_bps", 0.0))
+    if not math.isfinite(min_add_net_bps) or min_add_net_bps < 0:
+        raise ConfigError("inventory.min_add_net_bps must be finite and >= 0")
     profit_only_min_bps = float(_get(
         raw, "risk", "profit_only_min_bps", 1.0))
     if profit_only_min_bps < 0:
@@ -503,6 +508,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         take_fraction=take_fraction,
         max_order_notional=float(_get(raw, "sizing", "max_order_notional_usd", 500.0)),
         min_order_notional=float(_get(raw, "sizing", "min_order_notional_usd", 10.0)),
+        min_add_net_bps=min_add_net_bps,
         inventory_scale_bps=float(_get(raw, "inventory", "scale_bps", 10.0)),
         inventory_floor_frac=float(_get(raw, "inventory", "floor_frac", 0.5)),
         dust_flip_min_net_bps=dust_flip_min_net_bps,

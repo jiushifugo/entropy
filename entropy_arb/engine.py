@@ -385,8 +385,14 @@ class Engine:
         # Require explicit edge for adverse book movement during that serial
         # gap.  This raises the admission hurdle and cannot be spent by the
         # dynamic Entropy IOC slippage allowance.
-        return (base + self._inv_add_bps(buy, sell)
-                + self.cfg.second_leg_latency_reserve_bps)
+        hurdle = base + self._inv_add_bps(buy, sell)
+        # Preserve paired reduction thresholds; apply the absolute floor only
+        # to opening/increasing inventory. All admission and resting checks
+        # share this threshold, including dynamic first-leg slippage.
+        minimum = self.cfg.min_add_net_bps
+        if minimum > 0 and not (closing_long or closing_short):
+            hurdle = max(hurdle, minimum)
+        return hurdle + self.cfg.second_leg_latency_reserve_bps
 
     def _state_cap_notional(self, dkey: str, ref_px: float) -> float:
         """Return the strategy notional allowed by current paired inventory.

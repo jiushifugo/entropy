@@ -130,3 +130,15 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print(f"{name:40s} OK")
+
+
+def test_min_add_net_floor_loads_and_rejects_invalid_values():
+    assert load(MINIMAL, hedge="lighter").min_add_net_bps == 0
+    assert load(MINIMAL + "\ninventory:\n  min_add_net_bps: 1.0\n",
+                hedge="lighter").min_add_net_bps == 1
+    for value in ("-1", ".nan", ".inf"):
+        try:
+            load(MINIMAL + f"\ninventory:\n  min_add_net_bps: {value}\n", hedge="lighter")
+        except ConfigError:
+            continue
+        raise AssertionError(f"invalid minimum accepted: {value}")
